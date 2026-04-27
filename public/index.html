@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#101010">
+    <title>Air Hockey Online</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="rink-wrap" aria-label="Air hockey table">
+        <canvas id="rink" width="590" height="1024"></canvas>
+        <div class="scorebar" aria-live="polite">
+          <div class="score-side">
+            <span class="dot dot-you"></span>
+            <span id="youLabel">You</span>
+            <strong id="youScore">0</strong>
+          </div>
+          <div class="room-pill" id="roomPill">Offline</div>
+          <div class="score-side score-side-right">
+            <strong id="opponentScore">0</strong>
+            <span id="opponentLabel">Opponent</span>
+            <span class="dot dot-them"></span>
+          </div>
+        </div>
+        <div class="center-status" id="centerStatus">Choose a mode</div>
+      </section>
+
+      <aside class="panel" aria-label="Game controls">
+        <header>
+          <p class="eyebrow">Online Air Hockey</p>
+          <h1>First to 7</h1>
+        </header>
+
+        <div class="segmented" role="group" aria-label="Puck count">
+          <button class="segment active" id="onePuckButton" type="button">1 puck</button>
+          <button class="segment" id="twoPuckButton" type="button">2 pucks</button>
+        </div>
+
+        <div class="actions">
+          <button class="primary" id="quickButton" type="button">Quick Match</button>
+          <button id="createButton" type="button">Create Room</button>
+          <button id="botButton" type="button">Practice Bot</button>
+        </div>
+
+        <form class="join-row" id="joinForm">
+          <input id="roomInput" autocomplete="off" maxlength="6" placeholder="Room code" aria-label="Room code">
+          <button type="submit">Join</button>
+        </form>
+
+        <div class="room-tools">
+          <button id="copyButton" type="button" disabled>Copy Link</button>
+          <button id="restartButton" type="button" disabled>Restart</button>
+          <button id="leaveButton" type="button" disabled>Leave</button>
+        </div>
+
+        <dl class="meta">
+          <div>
+            <dt>Room</dt>
+            <dd id="roomCode">-</dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd id="connectionStatus">Connecting</dd>
+          </div>
+          <div>
+            <dt>Ping</dt>
+            <dd id="pingStatus">-</dd>
+          </div>
+        </dl>
+      </aside>
+    </main>
+
+    <script src="/client.js" type="module"></script>
+  </body>
+</html>
