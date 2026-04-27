@@ -37,6 +37,14 @@ Online mode supports remote play through room creation and room join flows. Play
 - First-to-7 scoring with pause, goal, and game-over states.
 - Touch-friendly gameplay with browser-based instant play.
 
+## How to Play
+
+- Double tap the center area on touch devices to pause or resume.
+- Press `Space` on desktop to pause or resume.
+- In same-device two-player mode, touchpads and mouse-like single-pointer devices control the bottom mallet by default.
+- In same-device two-player mode, press `C` to switch control between the bottom and top mallet.
+- Wireless and online multiplayer modes do not support mallet switching with `C`.
+
 ## Technology
 
 - Node.js HTTP server with a lightweight WebSocket implementation.

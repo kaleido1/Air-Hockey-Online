@@ -225,6 +225,7 @@ let uiTransitionStartedAt = performance.now();
 let pendingStartMode = "bot";
 let menuButtons = [];
 let soundEnabled = true;
+let localPointerMalletIndex = 0;
 let lastPhase = null;
 let phaseChangedAt = performance.now();
 let gameoverReturnTimer = 0;
@@ -327,7 +328,7 @@ canvas.addEventListener("pointerdown", (event) => {
     return;
   }
   if (isLocalGame() && point) {
-    const localIndex = point.y < TABLE.height / 2 ? 1 : 0;
+    const localIndex = event.pointerType === "touch" ? (point.y < TABLE.height / 2 ? 1 : 0) : localPointerMalletIndex;
     activePointers.set(event.pointerId, localIndex);
     sendPointer(event, true, localIndex);
   } else {
@@ -360,11 +361,17 @@ canvas.addEventListener("pointercancel", () => {
 });
 
 window.addEventListener("keydown", (event) => {
-  if (event.code !== "Space") return;
-  if (!roomCode || !serverState || !["playing", "paused"].includes(serverState.phase)) return;
-  event.preventDefault();
-  unlockAudio();
-  send({ type: "pause" });
+  if (event.code === "Space") {
+    if (!roomCode || !serverState || !["playing", "paused"].includes(serverState.phase)) return;
+    event.preventDefault();
+    unlockAudio();
+    send({ type: "pause" });
+    return;
+  }
+
+  if (event.code === "KeyC" && isLocalGame()) {
+    localPointerMalletIndex = localPointerMalletIndex === 0 ? 1 : 0;
+  }
 });
 
 function connect() {
@@ -1101,6 +1108,7 @@ function clearControls() {
   pointerDown = false;
   activePointers.clear();
   lastCenterTapAt = 0;
+  localPointerMalletIndex = 0;
 }
 
 function exitToMain() {
