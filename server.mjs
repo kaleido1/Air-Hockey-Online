@@ -33,7 +33,7 @@ const PUCK_MIN_LIVE_SPEED = 180;
 const WALL_RESTITUTION = 0.96;
 const PUCK_RESTITUTION = 0.87;
 const MALLET_RESTITUTION = 0.76;
-const PUCK_SUBSTEPS = 4;
+const PUCK_SUBSTEPS = 6;
 const FRICTION_PER_SECOND = 0.992;
 const STUCK_SPEED = 95;
 const STUCK_SECONDS = 0.38;
@@ -818,11 +818,15 @@ function collidePuckWithMallet(room, puck, mallet) {
   const startY = Number.isFinite(mallet.sweepFromY) ? mallet.sweepFromY : mallet.y;
   const puckStartX = Number.isFinite(puck.prevX) ? puck.prevX : puck.x;
   const puckStartY = Number.isFinite(puck.prevY) ? puck.prevY : puck.y;
-  const puckTravel = Math.hypot(puck.x - puckStartX, puck.y - puckStartY);
   const sweepX = mallet.x - startX;
   const sweepY = mallet.y - startY;
-  const malletTravel = Math.hypot(sweepX, sweepY);
-  const sweepLengthSq = sweepX * sweepX + sweepY * sweepY;
+  const puckDeltaX = puck.x - puckStartX;
+  const puckDeltaY = puck.y - puckStartY;
+  const relativeStartX = puckStartX - startX;
+  const relativeStartY = puckStartY - startY;
+  const relativeDeltaX = puckDeltaX - sweepX;
+  const relativeDeltaY = puckDeltaY - sweepY;
+  let hitT = 1;
   let contactX = mallet.x;
   let contactY = mallet.y;
   let probeX = puck.x;
@@ -832,40 +836,37 @@ function collidePuckWithMallet(room, puck, mallet) {
   let distance = Math.hypot(dx, dy);
 
   if (distance >= minDistance) {
-    const sampleCount = clamp(Math.ceil(Math.max(puckTravel, malletTravel) / 12), 1, 16);
+    const a = relativeDeltaX * relativeDeltaX + relativeDeltaY * relativeDeltaY;
+    const b = 2 * (relativeStartX * relativeDeltaX + relativeStartY * relativeDeltaY);
+    const c = relativeStartX * relativeStartX + relativeStartY * relativeStartY - minDistance * minDistance;
+
     let hit = false;
-    for (let sample = 0; sample <= sampleCount; sample += 1) {
-      const t = sample / sampleCount;
-      const samplePuckX = puckStartX + (puck.x - puckStartX) * t;
-      const samplePuckY = puckStartY + (puck.y - puckStartY) * t;
-      const sampleMalletX = startX + sweepX * t;
-      const sampleMalletY = startY + sweepY * t;
-      const sampleDx = samplePuckX - sampleMalletX;
-      const sampleDy = samplePuckY - sampleMalletY;
-      const sampleDistance = Math.hypot(sampleDx, sampleDy);
-      if (sampleDistance <= minDistance) {
-        probeX = samplePuckX;
-        probeY = samplePuckY;
-        contactX = sampleMalletX;
-        contactY = sampleMalletY;
-        dx = sampleDx;
-        dy = sampleDy;
-        distance = sampleDistance;
-        hit = true;
-        break;
+    if (c <= 0) {
+      hit = true;
+      hitT = 0;
+    } else if (a > 0.000001) {
+      const discriminant = b * b - 4 * a * c;
+      if (discriminant >= 0) {
+        const root = Math.sqrt(discriminant);
+        const t0 = (-b - root) / (2 * a);
+        const t1 = (-b + root) / (2 * a);
+        if (t0 >= 0 && t0 <= 1) {
+          hit = true;
+          hitT = t0;
+        } else if (t1 >= 0 && t1 <= 1) {
+          hit = true;
+          hitT = t1;
+        }
       }
     }
 
-    if (!hit && sweepLengthSq > 0.001) {
-      const projection = clamp(
-        ((puck.x - startX) * sweepX + (puck.y - startY) * sweepY) / sweepLengthSq,
-        0,
-        1
-      );
-      contactX = startX + sweepX * projection;
-      contactY = startY + sweepY * projection;
-      dx = puck.x - contactX;
-      dy = puck.y - contactY;
+    if (hit) {
+      probeX = puckStartX + puckDeltaX * hitT;
+      probeY = puckStartY + puckDeltaY * hitT;
+      contactX = startX + sweepX * hitT;
+      contactY = startY + sweepY * hitT;
+      dx = probeX - contactX;
+      dy = probeY - contactY;
       distance = Math.hypot(dx, dy);
     }
   }
@@ -873,8 +874,8 @@ function collidePuckWithMallet(room, puck, mallet) {
   if (distance >= minDistance) return false;
 
   if (distance <= 0.001) {
-    dx = probeX - mallet.x;
-    dy = probeY - mallet.y;
+    dx = probeX - contactX;
+    dy = probeY - contactY;
     distance = Math.hypot(dx, dy) || 1;
   }
 

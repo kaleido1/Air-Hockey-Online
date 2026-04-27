@@ -1041,7 +1041,7 @@ function drawMainMenu(interactive) {
   ctx.shadowOffsetY = 3;
   ctx.fillText("air hockey", x + w / 2, y + 76);
   ctx.font = "900 17px Arial, sans-serif";
-  ctx.fillText("ONLINE", x + w / 2 + 132, y + 114);
+  ctx.fillText("ONLINE", x + w / 2 + 132, y + 124);
   ctx.restore();
 
   drawMiniPucks(x + 122, y + 32);
@@ -1459,44 +1459,35 @@ function drawRestartBubble() {
   ctx.fillText(t("resetGame"), TABLE.width / 2, 108);
   ctx.translate(TABLE.width / 2, 182);
   ctx.shadowBlur = 0;
-  const halo = ctx.createRadialGradient(0, 0, 4, 0, 0, 41);
-  halo.addColorStop(0, "rgba(255,255,255,0.2)");
-  halo.addColorStop(0.72, "rgba(112,162,255,0.22)");
-  halo.addColorStop(1, "rgba(112,162,255,0)");
-  ctx.fillStyle = halo;
-  ctx.beginPath();
-  ctx.arc(0, 0, 41, 0, Math.PI * 2);
-  ctx.fill();
-
-  const disc = ctx.createRadialGradient(-9, -11, 4, 0, 0, 31);
-  disc.addColorStop(0, "#ffffff");
-  disc.addColorStop(0.3, "#e4efff");
-  disc.addColorStop(0.66, "#90b8ff");
-  disc.addColorStop(1, "#4e7fd8");
-  ctx.fillStyle = disc;
-  ctx.beginPath();
-  ctx.arc(0, 0, 30, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.lineWidth = 2.6;
-  ctx.strokeStyle = "rgba(255,255,255,0.94)";
-  ctx.stroke();
-
   ctx.strokeStyle = "#2d61bb";
-  ctx.lineWidth = 5.8;
+  ctx.lineWidth = 8;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.beginPath();
-  ctx.arc(0, 0, 15.5, -0.24, Math.PI * 1.48);
+  ctx.arc(0, 0, 21, -0.42, Math.PI * 1.54);
+  ctx.stroke();
+
+  ctx.strokeStyle = "rgba(255,255,255,0.94)";
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.arc(0, 0, 20.2, -0.42, Math.PI * 1.5);
   ctx.stroke();
 
   ctx.fillStyle = "#2d61bb";
   ctx.beginPath();
-  ctx.moveTo(-15.5, -13.5);
-  ctx.lineTo(0.5, -20.5);
-  ctx.lineTo(-3, -4.5);
+  ctx.moveTo(-20.5, -18.5);
+  ctx.lineTo(2.5, -29);
+  ctx.lineTo(-2.5, -7.5);
   ctx.closePath();
   ctx.fill();
+
+  ctx.strokeStyle = "rgba(255,255,255,0.9)";
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  ctx.moveTo(-17.5, -17.5);
+  ctx.lineTo(-1.4, -24.5);
+  ctx.lineTo(-4.8, -10.5);
+  ctx.stroke();
   ctx.restore();
 }
 
