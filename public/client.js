@@ -74,6 +74,14 @@ const translations = {
     mainSingle: "单人游戏",
     mainLocal: "双人游戏",
     mainWireless: "无线双人游戏",
+    mainOnline: "在线双人游戏",
+    onlineTitle: "在线双人游戏",
+    onlineHint: "创建房间或输入房间号远程联机",
+    createOnlineRoom: "创建房间",
+    joinOnlineRoom: "加入房间",
+    enterRoomCode: "输入房间号",
+    roomCodeDisplay: "房间号",
+    shareRoomCode: "把房间号发给朋友",
     puckTitle: "选择冰球数量",
     onePuck: "1 个冰球",
     twoPuck: "2 个冰球",
@@ -97,6 +105,7 @@ const translations = {
     unableJoin: "无法加入对战",
     roomNotFound: "房间不存在",
     roomFull: "房间已满",
+    invalidRoomCode: "请输入有效房间号",
     quickMatch: "快速匹配",
     createRoom: "创建房间",
     practiceBot: "练习电脑",
@@ -133,6 +142,14 @@ const translations = {
     mainSingle: "Single Player",
     mainLocal: "Two Players",
     mainWireless: "Wireless Two Players",
+    mainOnline: "Online Two Players",
+    onlineTitle: "Online Two Players",
+    onlineHint: "Create a room or enter a room code",
+    createOnlineRoom: "Create Room",
+    joinOnlineRoom: "Join Room",
+    enterRoomCode: "Enter room code",
+    roomCodeDisplay: "Room Code",
+    shareRoomCode: "Send this room code to your friend",
     puckTitle: "Choose Pucks",
     onePuck: "1 Puck",
     twoPuck: "2 Pucks",
@@ -156,6 +173,7 @@ const translations = {
     unableJoin: "Unable to join",
     roomNotFound: "Room not found",
     roomFull: "Room is full",
+    invalidRoomCode: "Enter a valid room code",
     quickMatch: "Quick Match",
     createRoom: "Create Room",
     practiceBot: "Practice Bot",
@@ -213,6 +231,7 @@ let malletSprite = null;
 let puckSprite = null;
 let canvasMetrics = null;
 let currentCursor = "";
+const predictedMallets = new Map();
 
 applyLanguage();
 connect();
@@ -495,6 +514,7 @@ function translateStatus(text) {
     "Opponent left the room": "opponentLeft",
     "Room not found": "roomNotFound",
     "Room is full": "roomFull",
+    "Enter a valid room code": "invalidRoomCode",
     胜利: "victory",
     失败: "defeat",
     对手已离开: "opponentLeft",
@@ -634,6 +654,7 @@ function clearRoom() {
   serverState = null;
   previousState = null;
   roomPlayers = null;
+  predictedMallets.clear();
   trails.clear();
   els.roomCode.textContent = "-";
   els.roomPill.textContent = t("offline");
@@ -661,6 +682,11 @@ function sendPointer(event, force, overridePlayerIndex = null) {
     serverState.mallets[targetIndex].x = constrained.x;
     serverState.mallets[targetIndex].y = constrained.y;
   }
+  predictedMallets.set(targetIndex, {
+    x: constrained.x,
+    y: constrained.y,
+    expiresAt: performance.now() + 180
+  });
   send({ type: "input", x: constrained.x, y: constrained.y, playerIndex: targetIndex });
 }
 
@@ -809,9 +835,8 @@ function startSelectedMode(count) {
     setStatus("");
     showUi(null);
   } else if (pendingStartMode === "online") {
-    if (roomCode) {
-      send({ type: "restart" });
-    } else if (pendingRoomFromUrl) {
+    clearRoomUrl();
+    if (pendingRoomFromUrl) {
       send({ type: "join", code: pendingRoomFromUrl });
     } else {
       send({ type: "create", puckCount: count });
@@ -819,6 +844,17 @@ function startSelectedMode(count) {
     setStatus("waitingOpponent");
     showUi("waiting");
   }
+}
+
+function joinOnlineRoom() {
+  unlockAudio();
+  const rawCode = window.prompt(t("enterRoomCode"), "");
+  const code = String(rawCode || "").trim().toUpperCase();
+  if (!code) return;
+  clearRoomUrl();
+  send({ type: "join", code });
+  setStatus("waitingOpponent");
+  showUi("waiting");
 }
 
 function isActivePlay() {
@@ -833,6 +869,16 @@ function isActivePlay() {
 
 function isLocalGame() {
   return Boolean(roomSettings?.local);
+}
+
+function isOnlineRoom() {
+  return Boolean(roomCode && roomSettings && !roomSettings.lan && !roomSettings.local && !roomSettings.bot);
+}
+
+function getWaitingHintText() {
+  if (roomSettings?.lan) return t("waitingOtherPlayerJoin");
+  if (isOnlineRoom()) return t("shareRoomCode");
+  return t("readyToStart");
 }
 
 function clearControls() {
@@ -945,10 +991,6 @@ function drawGameOverlay(state) {
     const entering = previousUiScreen === null && progress >= 1 ? 0 : TABLE.height * (1 - eased);
     drawUiScreen(activeScreen, entering, 1, true);
   }
-
-  if (!activeScreen && statusText && !["playing", "paused", "point"].includes(state.phase)) {
-    drawStatusPill(statusText);
-  }
 }
 
 function drawDim(alpha) {
@@ -966,6 +1008,7 @@ function drawUiScreen(screen, offsetY, alpha, interactive) {
   if (screen === "main") drawMainMenu(interactive);
   if (screen === "puck") drawPuckMenu(interactive);
   if (screen === "lan") drawLanMenu(interactive);
+  if (screen === "online") drawOnlineMenu(interactive);
   if (screen === "waiting") drawWaitingMenu(interactive);
   if (screen === "notice") drawNoticeMenu(interactive);
 
@@ -974,9 +1017,9 @@ function drawUiScreen(screen, offsetY, alpha, interactive) {
 
 function drawMainMenu(interactive) {
   const x = 76;
-  const y = 286;
+  const y = 264;
   const w = 438;
-  const h = 462;
+  const h = 514;
   drawBluePanel(x, y, w, h, 24);
 
   ctx.save();
@@ -994,7 +1037,7 @@ function drawMainMenu(interactive) {
 
   drawMiniPucks(x + 122, y + 32);
 
-  const labels = [t("mainSingle"), t("mainLocal"), t("mainWireless")];
+  const labels = [t("mainSingle"), t("mainLocal"), t("mainWireless"), t("mainOnline")];
   const actions = [
     () => {
       clearRoomUrl();
@@ -1010,10 +1053,14 @@ function drawMainMenu(interactive) {
       pendingStartMode = "lan";
       showUi("lan");
     },
+    () => {
+      pendingStartMode = "online";
+      showUi("online");
+    },
   ];
 
-  for (let index = 0; index < 3; index += 1) {
-    const button = { x: x + 18, y: y + 158 + index * 74, w: w - 36, h: 58 };
+  for (let index = 0; index < 4; index += 1) {
+    const button = { x: x + 18, y: y + 150 + index * 70, w: w - 36, h: 54 };
     drawRedButton(button.x, button.y, button.w, button.h, labels[index], 29);
     if (interactive) addButton(button, actions[index]);
   }
@@ -1109,11 +1156,48 @@ function drawLanMenu(interactive) {
   }
 }
 
+function drawOnlineMenu(interactive) {
+  const x = 76;
+  const y = 374;
+  const w = 438;
+  const h = 286;
+  drawBluePanel(x, y, w, h, 24);
+
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#ffffff";
+  ctx.shadowColor = "rgba(0,0,0,0.58)";
+  ctx.shadowBlur = 2;
+  ctx.shadowOffsetY = 3;
+  ctx.font = "800 32px Arial, sans-serif";
+  ctx.fillText(t("onlineTitle"), x + w / 2, y + 56);
+  ctx.font = "700 20px Arial, sans-serif";
+  ctx.fillText(t("onlineHint"), x + w / 2, y + 92);
+  ctx.restore();
+
+  const create = { x: x + 18, y: y + 116, w: w - 36, h: 54 };
+  const join = { x: x + 18, y: y + 184, w: w - 36, h: 54 };
+  const back = { x: x + 18, y: y + 246, w: w - 36, h: 34 };
+  drawRedButton(create.x, create.y, create.w, create.h, t("createOnlineRoom"), 28);
+  drawRedButton(join.x, join.y, join.w, join.h, t("joinOnlineRoom"), 28);
+  drawRedButton(back.x, back.y, back.w, back.h, t("back"), 21);
+
+  if (interactive) {
+    addButton(create, () => {
+      pendingStartMode = "online";
+      showUi("puck");
+    });
+    addButton(join, joinOnlineRoom);
+    addButton(back, () => showUi("main"));
+  }
+}
+
 function drawWaitingMenu(interactive) {
   const x = 82;
-  const y = 378;
+  const y = isOnlineRoom() ? 344 : 378;
   const w = 426;
-  const h = roomSettings?.lan ? 210 : 188;
+  const h = isOnlineRoom() ? 300 : roomSettings?.lan ? 210 : 188;
   drawBluePanel(x, y, w, h, 24);
 
   ctx.save();
@@ -1126,7 +1210,15 @@ function drawWaitingMenu(interactive) {
   ctx.font = "800 34px Arial, sans-serif";
   ctx.fillText(statusText || t("waitingJoin"), x + w / 2, y + 62);
   ctx.font = "700 22px Arial, sans-serif";
-  ctx.fillText(roomSettings?.lan ? t("waitingOtherPlayerJoin") : t("readyToStart"), x + w / 2, y + 122);
+  ctx.fillText(getWaitingHintText(), x + w / 2, y + 122);
+  if (isOnlineRoom()) {
+    ctx.font = "800 24px Arial, sans-serif";
+    ctx.fillText(t("roomCodeDisplay"), x + w / 2, y + 166);
+    ctx.font = "900 44px Arial, sans-serif";
+    ctx.letterSpacing = "4px";
+    ctx.fillText(roomCode || "-", x + w / 2, y + 212);
+    ctx.letterSpacing = "0px";
+  }
   ctx.restore();
 
   const back = { x: x + 26, y: y + h - 66, w: w - 52, h: 48 };
@@ -1752,10 +1844,24 @@ function drawState(state) {
   }
 
   for (let index = 0; index < state.mallets.length; index += 1) {
-    drawMallet(state.mallets[index]);
+    drawMallet(displayMallet(state.mallets[index], index));
   }
 
   ctx.restore();
+}
+
+function displayMallet(mallet, index) {
+  const predicted = predictedMallets.get(index);
+  if (!predicted) return mallet;
+  if (performance.now() > predicted.expiresAt) {
+    predictedMallets.delete(index);
+    return mallet;
+  }
+  return {
+    ...mallet,
+    x: predicted.x,
+    y: predicted.y
+  };
 }
 
 function drawCanvasScores(state) {

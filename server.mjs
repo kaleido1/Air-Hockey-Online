@@ -383,6 +383,11 @@ function joinRoom(client, code, preferredIndex = null) {
     return;
   }
 
+  if (room.settings.lan || room.settings.local) {
+    send(client, { type: "error", message: "Room not found" });
+    return;
+  }
+
   if (room.players[1]?.bot) {
     room.players[1] = null;
   }
