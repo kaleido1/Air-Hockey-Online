@@ -1,6 +1,8 @@
 const canvas = document.querySelector("#rink");
+const isAndroid = /Android/i.test(navigator.userAgent || "");
 let ctx =
-  canvas.getContext("2d", { alpha: false, desynchronized: true }) ||
+  (!isAndroid && canvas.getContext("2d", { alpha: false, desynchronized: true })) ||
+  canvas.getContext("2d", { alpha: false }) ||
   canvas.getContext("2d");
 
 const els = {
@@ -233,6 +235,8 @@ let displayRefreshHz = 60;
 let hasReportedRefreshHz = false;
 let refreshSampleFrames = [];
 let renderScale = 1;
+let lastRenderFrameAt = 0;
+let renderBudgetMs = 0;
 let tableCache = null;
 let malletSprite = null;
 let puckSprite = null;
@@ -531,7 +535,7 @@ function startRefreshRateSampling() {
 
     refreshSampleFrames.sort((a, b) => a - b);
     const median = refreshSampleFrames[Math.floor(refreshSampleFrames.length / 2)] || 1000 / 60;
-    const measuredHz = clamp(Math.round(1000 / median), 60, 144);
+    const measuredHz = clamp(Math.round(1000 / median), 60, getRefreshHzCap());
     if (Math.abs(measuredHz - displayRefreshHz) >= 3) {
       displayRefreshHz = measuredHz;
       hasReportedRefreshHz = false;
@@ -546,6 +550,12 @@ function reportRefreshRate() {
   if (!connected || hasReportedRefreshHz) return;
   hasReportedRefreshHz = true;
   send({ type: "display", refreshHz: displayRefreshHz });
+}
+
+function getRefreshHzCap() {
+  if (isAndroid) return 60;
+  if (touchCapable) return 120;
+  return 144;
 }
 
 function getInitialLanguage() {
@@ -1191,6 +1201,16 @@ function interpolateBody(from, to, alpha) {
 
 function render(frameTime = performance.now()) {
   requestAnimationFrame(render);
+  const targetFrameMs = 1000 / Math.max(60, displayRefreshHz);
+  if (!lastRenderFrameAt) {
+    lastRenderFrameAt = frameTime;
+  } else {
+    const elapsed = Math.min(100, Math.max(0, frameTime - lastRenderFrameAt));
+    lastRenderFrameAt = frameTime;
+    renderBudgetMs += elapsed;
+    if (renderBudgetMs + 0.25 < targetFrameMs) return;
+    renderBudgetMs %= targetFrameMs;
+  }
   const state = renderState() || demoState();
   const nextCursor = isActivePlay() ? "none" : "default";
   if (currentCursor !== nextCursor) {
