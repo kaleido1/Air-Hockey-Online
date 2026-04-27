@@ -40,6 +40,7 @@ const CONTACT_SLOP = 1.25;
 const STATIC_PUCK_SPEED = 70;
 const STATIC_STRIKE_MIN_SPEED = 520;
 const STATIC_SWEEP_MIN_SPEED = 460;
+const EDGE_BLOCK_RESPONSE_SPEED = 48;
 const PUCK_SUBSTEPS = 16;
 const FRICTION_PER_SECOND = 0.991;
 const STUCK_SPEED = 95;
@@ -902,17 +903,34 @@ function rescueStuckPuck(room, puck, dt) {
 
 function forceSeparatePuckFromMallet(room, puck, mallet) {
   const minDistance = TABLE.puckRadius + TABLE.malletRadius;
-  const dx = puck.x - mallet.x;
-  const dy = puck.y - mallet.y;
-  const distance = Math.hypot(dx, dy);
-  if (distance >= minDistance || distance <= 0.001) return;
+  let dx = puck.x - mallet.x;
+  let dy = puck.y - mallet.y;
+  let distance = Math.hypot(dx, dy);
+  if (distance >= minDistance) return;
+  if (distance <= 0.001) {
+    dx = puck.vx - mallet.vx;
+    dy = puck.vy - mallet.vy;
+    distance = Math.hypot(dx, dy);
+    if (distance <= 0.001) {
+      dx = 0;
+      dy = -1;
+      distance = 1;
+    }
+  }
 
-  // Puck is overlapping mallet — gently push it out (position only)
   const nx = dx / distance;
   const ny = dy / distance;
-  const overlap = minDistance - distance + 1;
+  const overlap = minDistance - distance + CONTACT_SEPARATION + 0.85;
   puck.x += nx * overlap;
   puck.y += ny * overlap;
+
+  const relativeNormalSpeed = (puck.vx - mallet.vx) * nx + (puck.vy - mallet.vy) * ny;
+  if (relativeNormalSpeed < EDGE_BLOCK_RESPONSE_SPEED) {
+    const correction = EDGE_BLOCK_RESPONSE_SPEED - relativeNormalSpeed;
+    puck.vx += nx * correction;
+    puck.vy += ny * correction;
+    capPuckSpeed(puck);
+  }
 }
 
 function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
@@ -1058,9 +1076,12 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
     relativeNormalSpeed > -80;
 
   if (repeatedContact) {
-    if (distance < minDistance + CONTACT_SEPARATION && strikeSpeed > 80) {
+    if (distance < minDistance + CONTACT_SEPARATION) {
       const puckNormalSpeed = puck.vx * nx + puck.vy * ny;
-      const escapeSpeed = Math.max(PUCK_MIN_LIVE_SPEED, strikeSpeed * 0.28);
+      const escapeSpeed = Math.max(
+        EDGE_BLOCK_RESPONSE_SPEED,
+        strikeSpeed > 80 ? strikeSpeed * 0.28 : 0
+      );
       if (puckNormalSpeed < escapeSpeed) {
         const escape = escapeSpeed - puckNormalSpeed;
         puck.vx += nx * escape;
