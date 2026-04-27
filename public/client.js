@@ -267,7 +267,7 @@ canvas.addEventListener("pointerdown", (event) => {
   measureCanvas();
   unlockAudio();
   const point = eventToCanvas(event);
-  if (point && handleTouchPause(event, point)) {
+  if (point && handleCanvasUi(point, event.detail || 1)) {
     pointerDown = false;
     try {
       canvas.releasePointerCapture(event.pointerId);
@@ -276,7 +276,7 @@ canvas.addEventListener("pointerdown", (event) => {
     }
     return;
   }
-  if (point && handleCanvasUi(point, event.detail || 1)) {
+  if (point && handleTouchPause(event, point)) {
     pointerDown = false;
     try {
       canvas.releasePointerCapture(event.pointerId);
@@ -440,6 +440,9 @@ function handleMessage(message) {
     case "error":
       setUiNotice(message.message || "unableJoin");
       setStatus(message.message || "error");
+      break;
+    case "left":
+      clearRoom();
       break;
     case "pong":
       if (message.at) {
@@ -651,9 +654,13 @@ function sendPointer(event, force, overridePlayerIndex = null) {
   const point = eventToTable(event);
   if (!point) return;
   const targetIndex = overridePlayerIndex === 0 || overridePlayerIndex === 1 ? overridePlayerIndex : playerIndex;
-  if (!force && now - lastInputAtByPlayer[targetIndex] < 1000 / 75) return;
+  if (!force && now - lastInputAtByPlayer[targetIndex] < 1000 / 120) return;
   lastInputAtByPlayer[targetIndex] = now;
   const constrained = constrainForPlayer(targetIndex, point.x, point.y);
+  if (serverState?.mallets?.[targetIndex]) {
+    serverState.mallets[targetIndex].x = constrained.x;
+    serverState.mallets[targetIndex].y = constrained.y;
+  }
   send({ type: "input", x: constrained.x, y: constrained.y, playerIndex: targetIndex });
 }
 
@@ -745,7 +752,7 @@ function handleCanvasUi(point, clickCount = 1) {
     }
   }
 
-  return Boolean(uiScreen || serverState?.phase === "paused");
+  return Boolean(uiScreen);
 }
 
 function handleTouchPause(event, point) {
@@ -835,7 +842,7 @@ function clearControls() {
 }
 
 function exitToMain() {
-  send({ type: "leave" });
+  send({ type: "leaveToMenu" });
   clearRoom();
 }
 
@@ -1195,8 +1202,8 @@ function drawPauseOverlay() {
   drawSpeakerIcon(140, 760, soundEnabled);
   ctx.restore();
 
-  addButton({ x: 142, y: 24, w: 306, h: 128 }, exitToMain);
-  addButton({ x: 202, y: 120, w: 186, h: 124 }, () => send({ type: "restart" }));
+  addButton({ x: 202, y: 138, w: 186, h: 112 }, () => send({ type: "restart" }));
+  addButton({ x: 124, y: 22, w: 342, h: 116 }, exitToMain);
   addButton({ x: 62, y: 686, w: 172, h: 150 }, () => {
     soundEnabled = !soundEnabled;
     if (!soundEnabled && audio) audio.suspend();

@@ -24,6 +24,7 @@ const PHYSICS_HZ = 120;
 const SNAPSHOT_HZ = 60;
 const DT = 1 / PHYSICS_HZ;
 const MALLET_MAX_SPEED = 5200;
+const HUMAN_MALLET_MAX_SPEED = 9000;
 const BOT_MIN_SPEED = 2100;
 const BOT_MAX_SPEED = 4550;
 const PUCK_MAX_SPEED = 2300;
@@ -38,7 +39,6 @@ const STUCK_SECONDS = 0.38;
 const rooms = new Map();
 const clients = new Map();
 const quickQueue = [];
-let lanRoomCode = null;
 
 const mimeTypes = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -249,6 +249,10 @@ function handleMessage(client, message) {
     case "leave":
       leaveRoom(client, false);
       break;
+    case "leaveToMenu":
+      leaveRoom(client, false);
+      send(client, { type: "left" });
+      break;
     case "ping":
       send(client, { type: "pong", at: message.at || Date.now() });
       break;
@@ -326,23 +330,8 @@ function joinLanRoom(client, puckCount) {
   leaveRoom(client, false);
   removeFromQueue(client);
 
-  let room = lanRoomCode ? rooms.get(lanRoomCode) : null;
-  if (room && room.settings.lan) {
-    const reconnectSlot = room.players.findIndex(
-      (player) =>
-        player &&
-        !player.bot &&
-        ((client.playerKey && player.key === client.playerKey) || player.id === client.id)
-    );
-    const humans = room.players.filter((player) => player && !player.bot);
-    if (reconnectSlot < 0 && humans.length >= 2) {
-      send(client, { type: "error", message: "无法加入对战" });
-      return;
-    }
-  } else {
-    room = makeRoom({ puckCount, lan: true });
-    lanRoomCode = room.code;
-  }
+  const reconnectRoom = findLanReconnectRoom(client);
+  const room = reconnectRoom || findOpenLanRoom(puckCount) || makeRoom({ puckCount, lan: true });
 
   const reconnectSlot = room.players.findIndex(
     (player) =>
@@ -353,6 +342,33 @@ function joinLanRoom(client, puckCount) {
   const slot = reconnectSlot >= 0 ? reconnectSlot : room.players[0] ? 1 : 0;
   addPlayer(room, client, slot);
   if (canStartRoom(room)) startRoom(room);
+}
+
+function findLanReconnectRoom(client) {
+  for (const room of rooms.values()) {
+    if (!room.settings.lan) continue;
+    const slot = room.players.findIndex(
+      (player) =>
+        player &&
+        !player.bot &&
+        ((client.playerKey && player.key === client.playerKey) || player.id === client.id)
+    );
+    if (slot >= 0) return room;
+  }
+  return null;
+}
+
+function findOpenLanRoom(puckCount) {
+  let oldestRoom = null;
+  for (const room of rooms.values()) {
+    if (!room.settings.lan) continue;
+    if (room.state.phase !== "waiting") continue;
+    if (room.settings.puckCount !== puckCount) continue;
+    const humans = room.players.filter((player) => player && !player.bot);
+    if (humans.length >= 2) continue;
+    if (!oldestRoom || room.createdAt < oldestRoom.createdAt) oldestRoom = room;
+  }
+  return oldestRoom;
 }
 
 function joinRoom(client, code, preferredIndex = null) {
@@ -532,7 +548,6 @@ function leaveRoom(client, notify = true) {
   }
 
   if (!room.players[0] && !room.players[1]) {
-    if (room.settings.lan && lanRoomCode === room.code) lanRoomCode = null;
     rooms.delete(room.code);
     return;
   }
@@ -592,8 +607,19 @@ function updateInput(client, message) {
   const x = clamp(Number(message.x), TABLE.malletRadius, TABLE.width - TABLE.malletRadius);
   const y = clamp(Number(message.y), TABLE.malletRadius, TABLE.height - TABLE.malletRadius);
   const constrained = constrainMallet(playerIndex, x, y);
+  const previousX = mallet.x;
+  const previousY = mallet.y;
+  const dx = constrained.x - previousX;
+  const dy = constrained.y - previousY;
+  const speed = Math.hypot(dx, dy) * PHYSICS_HZ;
+  const velocityScale = speed > HUMAN_MALLET_MAX_SPEED ? HUMAN_MALLET_MAX_SPEED / speed : 1;
+  mallet.x = constrained.x;
+  mallet.y = constrained.y;
   mallet.targetX = constrained.x;
   mallet.targetY = constrained.y;
+  mallet.vx = dx * PHYSICS_HZ * velocityScale;
+  mallet.vy = dy * PHYSICS_HZ * velocityScale;
+  mallet.directInputUntil = Date.now() + 120;
   room.updatedAt = Date.now();
 }
 
@@ -634,6 +660,7 @@ function tickRooms() {
 function moveMallets(state, dt) {
   for (let index = 0; index < state.mallets.length; index += 1) {
     const mallet = state.mallets[index];
+    if (mallet.directInputUntil && Date.now() < mallet.directInputUntil) continue;
     const target = constrainMallet(index, mallet.targetX, mallet.targetY);
     const dx = target.x - mallet.x;
     const dy = target.y - mallet.y;
@@ -1052,7 +1079,6 @@ function cleanupRooms() {
       (player) => player && !player.bot && clients.has(player.id)
     );
     if (!hasConnectedHuman && now - room.updatedAt > 30_000) {
-      if (room.settings.lan && lanRoomCode === code) lanRoomCode = null;
       rooms.delete(code);
     }
   }
