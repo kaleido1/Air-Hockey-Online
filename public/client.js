@@ -764,13 +764,33 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
     }
     normalX /= normalLength;
     normalY /= normalLength;
+    const moveLength = Math.hypot(sweepX, sweepY) || 1;
+    const moveX = sweepX / moveLength;
+    const moveY = sweepY / moveLength;
 
-    puck.x = contactMalletX + normalX * (minDistance + LOCAL_CONTACT_SEPARATION);
-    puck.y = contactMalletY + normalY * (minDistance + LOCAL_CONTACT_SEPARATION);
+    const puckSpeed = Math.hypot(puck.vx || 0, puck.vy || 0);
+    const staticKick = puckSpeed < 70 && finalDistance <= collisionDistance ? 520 : 0;
+    const sweepKick = staticKick > 0 && malletSpeed > 260 ? 460 : 0;
+    let exitX = normalX;
+    let exitY = normalY;
+    if (sweepKick > 0) {
+      let blendedX = normalX * 0.55 + moveX * 0.82;
+      let blendedY = normalY * 0.55 + moveY * 0.82;
+      if (blendedX * normalX + blendedY * normalY < 0.25) {
+        blendedX += normalX * 0.75;
+        blendedY += normalY * 0.75;
+      }
+      const blendedLength = Math.hypot(blendedX, blendedY) || 1;
+      exitX = blendedX / blendedLength;
+      exitY = blendedY / blendedLength;
+    }
 
-    const strike = Math.min(820, 180 + malletSpeed * 0.12);
-    puck.vx = normalX * strike + sweepX * 9.5;
-    puck.vy = normalY * strike + sweepY * 9.5;
+    puck.x = contactMalletX + exitX * (minDistance + LOCAL_CONTACT_SEPARATION);
+    puck.y = contactMalletY + exitY * (minDistance + LOCAL_CONTACT_SEPARATION);
+
+    const strike = Math.min(820, Math.max(staticKick, 180 + malletSpeed * 0.12));
+    puck.vx = exitX * strike + moveX * sweepKick + sweepX * 9.5;
+    puck.vy = exitY * strike + moveY * sweepKick + sweepY * 9.5;
     puck.x += puck.vx * 0.014;
     puck.y += puck.vy * 0.014;
     puck.localPredictedAt = now;

@@ -37,6 +37,9 @@ const MALLET_STRIKE_TRANSFER = 0.62;
 const MALLET_HIT_COOLDOWN_MS = 28;
 const CONTACT_SEPARATION = 0.75;
 const CONTACT_SLOP = 1.25;
+const STATIC_PUCK_SPEED = 70;
+const STATIC_STRIKE_MIN_SPEED = 520;
+const STATIC_SWEEP_MIN_SPEED = 460;
 const PUCK_SUBSTEPS = 16;
 const FRICTION_PER_SECOND = 0.991;
 const STUCK_SPEED = 95;
@@ -971,10 +974,36 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   const rvy = puck.vy - mallet.vy;
   const relativeNormalSpeed = rvx * nx + rvy * ny;
   const strikeSpeed = Math.max(0, mallet.vx * nx + mallet.vy * ny);
+  const malletSpeed = Math.hypot(mallet.vx, mallet.vy);
+  const moveX = malletSpeed > 0.001 ? mallet.vx / malletSpeed : nx;
+  const moveY = malletSpeed > 0.001 ? mallet.vy / malletSpeed : ny;
+  const puckSpeed = Math.hypot(puck.vx, puck.vy);
+  const activeStaticPush =
+    puckSpeed < STATIC_PUCK_SPEED &&
+    (strikeSpeed > 90 || malletSpeed > 260) &&
+    distance <= minDistance + CONTACT_SEPARATION;
+  let exitX = nx;
+  let exitY = ny;
+  if (activeStaticPush && malletSpeed > 260) {
+    let blendedX = nx * 0.55 + moveX * 0.82;
+    let blendedY = ny * 0.55 + moveY * 0.82;
+    if (blendedX * nx + blendedY * ny < 0.25) {
+      blendedX += nx * 0.75;
+      blendedY += ny * 0.75;
+    }
+    const blendedLength = Math.hypot(blendedX, blendedY) || 1;
+    exitX = blendedX / blendedLength;
+    exitY = blendedY / blendedLength;
+    const anchorX = sweptHit ? contactX : mallet.x;
+    const anchorY = sweptHit ? contactY : mallet.y;
+    puck.x = anchorX + exitX * (minDistance + CONTACT_SEPARATION);
+    puck.y = anchorY + exitY * (minDistance + CONTACT_SEPARATION);
+  }
   if (!sweptHit && distance > minDistance && (strikeSpeed < 260 || relativeNormalSpeed > -90)) {
     return false;
   }
   const repeatedContact =
+    !activeStaticPush &&
     puck.lastMalletHitIndex === malletIndex &&
     now - (puck.lastMalletHitAt || 0) < MALLET_HIT_COOLDOWN_MS &&
     relativeNormalSpeed > -80;
@@ -1001,13 +1030,34 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
     puck.vy += ny * impulse;
   }
 
-  if (strikeSpeed > 120) {
+  if (strikeSpeed > 90) {
     const puckNormalSpeed = puck.vx * nx + puck.vy * ny;
-    const targetNormalSpeed = Math.max(PUCK_MIN_LIVE_SPEED, strikeSpeed * MALLET_STRIKE_TRANSFER);
+    const targetNormalSpeed = Math.max(
+      PUCK_MIN_LIVE_SPEED,
+      activeStaticPush ? STATIC_STRIKE_MIN_SPEED : 0,
+      strikeSpeed * MALLET_STRIKE_TRANSFER
+    );
     if (puckNormalSpeed < targetNormalSpeed) {
       const carry = targetNormalSpeed - puckNormalSpeed;
       puck.vx += nx * carry;
       puck.vy += ny * carry;
+    }
+  }
+
+  if (activeStaticPush && malletSpeed > 260) {
+    const puckExitSpeed = puck.vx * exitX + puck.vy * exitY;
+    if (puckExitSpeed < STATIC_STRIKE_MIN_SPEED) {
+      const carry = STATIC_STRIKE_MIN_SPEED - puckExitSpeed;
+      puck.vx += exitX * carry;
+      puck.vy += exitY * carry;
+    }
+
+    const puckMoveSpeed = puck.vx * moveX + puck.vy * moveY;
+    const targetMoveSpeed = Math.max(STATIC_SWEEP_MIN_SPEED, malletSpeed * 0.18);
+    if (puckMoveSpeed < targetMoveSpeed) {
+      const carry = targetMoveSpeed - puckMoveSpeed;
+      puck.vx += moveX * carry;
+      puck.vy += moveY * carry;
     }
   }
 
