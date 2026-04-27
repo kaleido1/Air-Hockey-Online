@@ -24,14 +24,16 @@ const PHYSICS_HZ = 120;
 const SNAPSHOT_HZ = 60;
 const DT = 1 / PHYSICS_HZ;
 const MALLET_MAX_SPEED = 5200;
-const HUMAN_MALLET_MAX_SPEED = 9000;
+const HUMAN_MALLET_MAX_SPEED = 7600;
 const BOT_MIN_SPEED = 2100;
 const BOT_MAX_SPEED = 4550;
 const PUCK_MAX_SPEED = 2300;
 const PUCK_MIN_SERVE_SPEED = 520;
 const PUCK_MIN_LIVE_SPEED = 180;
-const WALL_RESTITUTION = 0.985;
-const PUCK_RESTITUTION = 0.96;
+const WALL_RESTITUTION = 0.96;
+const PUCK_RESTITUTION = 0.87;
+const MALLET_RESTITUTION = 0.76;
+const PUCK_SUBSTEPS = 2;
 const FRICTION_PER_SECOND = 0.992;
 const STUCK_SPEED = 95;
 const STUCK_SECONDS = 0.38;
@@ -618,13 +620,15 @@ function updateInput(client, message) {
   const dy = constrained.y - previousY;
   const speed = Math.hypot(dx, dy) * PHYSICS_HZ;
   const velocityScale = speed > HUMAN_MALLET_MAX_SPEED ? HUMAN_MALLET_MAX_SPEED / speed : 1;
+  mallet.sweepFromX = previousX;
+  mallet.sweepFromY = previousY;
   mallet.x = constrained.x;
   mallet.y = constrained.y;
   mallet.targetX = constrained.x;
   mallet.targetY = constrained.y;
   mallet.vx = dx * PHYSICS_HZ * velocityScale;
   mallet.vy = dy * PHYSICS_HZ * velocityScale;
-  mallet.directInputUntil = Date.now() + 120;
+  mallet.directInputUntil = Date.now() + 90;
   room.updatedAt = Date.now();
 }
 
@@ -657,7 +661,9 @@ function tickRooms() {
     }
 
     if (room.state.phase === "playing") {
-      stepPucks(room, DT);
+      for (let substep = 0; substep < PUCK_SUBSTEPS && room.state.phase === "playing"; substep += 1) {
+        stepPucks(room, DT / PUCK_SUBSTEPS);
+      }
     }
   }
 }
@@ -674,6 +680,8 @@ function moveMallets(state, dt) {
     const maxMove = speedLimit * dt;
     const previousX = mallet.x;
     const previousY = mallet.y;
+    mallet.sweepFromX = previousX;
+    mallet.sweepFromY = previousY;
 
     if (distance > maxMove && distance > 0.001) {
       mallet.x += (dx / distance) * maxMove;
@@ -804,30 +812,55 @@ function rescueStuckPuck(room, puck, dt) {
 
 function collidePuckWithMallet(room, puck, mallet) {
   const minDistance = TABLE.puckRadius + TABLE.malletRadius;
-  const dx = puck.x - mallet.x;
-  const dy = puck.y - mallet.y;
-  const distance = Math.hypot(dx, dy);
-  if (distance >= minDistance || distance <= 0.001) return false;
+  const startX = Number.isFinite(mallet.sweepFromX) ? mallet.sweepFromX : mallet.x;
+  const startY = Number.isFinite(mallet.sweepFromY) ? mallet.sweepFromY : mallet.y;
+  const sweepX = mallet.x - startX;
+  const sweepY = mallet.y - startY;
+  const sweepLengthSq = sweepX * sweepX + sweepY * sweepY;
+  const projection =
+    sweepLengthSq > 0.001
+      ? clamp(((puck.x - startX) * sweepX + (puck.y - startY) * sweepY) / sweepLengthSq, 0, 1)
+      : 1;
+  const contactX = startX + sweepX * projection;
+  const contactY = startY + sweepY * projection;
+  let dx = puck.x - contactX;
+  let dy = puck.y - contactY;
+  let distance = Math.hypot(dx, dy);
+  if (distance >= minDistance) return false;
+
+  if (distance <= 0.001) {
+    dx = puck.x - mallet.x;
+    dy = puck.y - mallet.y;
+    distance = Math.hypot(dx, dy) || 1;
+  }
 
   const nx = dx / distance;
   const ny = dy / distance;
-  const overlap = minDistance - distance;
-  puck.x += nx * overlap;
-  puck.y += ny * overlap;
+  puck.x = contactX + nx * (minDistance + 0.2);
+  puck.y = contactY + ny * (minDistance + 0.2);
 
   const rvx = puck.vx - mallet.vx;
   const rvy = puck.vy - mallet.vy;
   const closingSpeed = rvx * nx + rvy * ny;
   const strikeSpeed = Math.max(0, mallet.vx * nx + mallet.vy * ny);
-  const intensity = clamp((Math.max(0, -closingSpeed) + strikeSpeed * 0.72) / 2100, 0.16, 1);
+  const impactSpeed = Math.max(0, -closingSpeed);
+  const intensity = clamp((impactSpeed + strikeSpeed * 0.34) / 2200, 0.14, 0.86);
 
   if (closingSpeed < 0) {
-    puck.vx -= (1 + PUCK_RESTITUTION) * closingSpeed * nx;
-    puck.vy -= (1 + PUCK_RESTITUTION) * closingSpeed * ny;
+    const impulse = (1 + MALLET_RESTITUTION) * impactSpeed;
+    puck.vx += nx * impulse;
+    puck.vy += ny * impulse;
   }
 
-  puck.vx += nx * (160 + strikeSpeed * 0.85) + mallet.vx * 0.18;
-  puck.vy += ny * (160 + strikeSpeed * 0.85) + mallet.vy * 0.18;
+  const carry = clamp(0.08 + (strikeSpeed / HUMAN_MALLET_MAX_SPEED) * 0.14, 0.08, 0.22);
+  puck.vx += (mallet.vx - puck.vx) * carry;
+  puck.vy += (mallet.vy - puck.vy) * carry;
+
+  const push = Math.min(90, strikeSpeed * 0.028);
+  puck.vx += nx * push;
+  puck.vy += ny * push;
+  puck.vx *= 0.988;
+  puck.vy *= 0.988;
 
   capPuckSpeed(puck);
   room.updatedAt = Date.now();
@@ -855,7 +888,7 @@ function collidePucks(a, b) {
   if (impact > 0) return 0;
   const intensity = clamp(Math.abs(impact) / 1800, 0.12, 0.82);
 
-  const impulse = -(1 + PUCK_RESTITUTION) * impact * 0.5;
+  const impulse = -(1 + PUCK_RESTITUTION) * impact * 0.46;
   a.vx -= impulse * nx;
   a.vy -= impulse * ny;
   b.vx += impulse * nx;
@@ -1019,6 +1052,8 @@ function initialState(puckCount = 1) {
         y: TABLE.height * 0.78,
         targetX: TABLE.width / 2,
         targetY: TABLE.height * 0.78,
+        sweepFromX: TABLE.width / 2,
+        sweepFromY: TABLE.height * 0.78,
         vx: 0,
         vy: 0
       },
@@ -1027,6 +1062,8 @@ function initialState(puckCount = 1) {
         y: TABLE.height * 0.22,
         targetX: TABLE.width / 2,
         targetY: TABLE.height * 0.22,
+        sweepFromX: TABLE.width / 2,
+        sweepFromY: TABLE.height * 0.22,
         vx: 0,
         vy: 0
       }
@@ -1053,6 +1090,8 @@ function centerMallets(state) {
     mallet.y = starts[index].y;
     mallet.targetX = starts[index].x;
     mallet.targetY = starts[index].y;
+    mallet.sweepFromX = starts[index].x;
+    mallet.sweepFromY = starts[index].y;
     mallet.vx = 0;
     mallet.vy = 0;
   });

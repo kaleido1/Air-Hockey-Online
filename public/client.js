@@ -208,6 +208,7 @@ let lastPingSentAt = 0;
 let reconnectTimer = 0;
 let heartbeatTimer = 0;
 let audio = null;
+let audioPrimed = false;
 let statusRaw = "chooseMode";
 let statusText = t("chooseMode");
 const playerKey = getPlayerKey();
@@ -1303,7 +1304,7 @@ function drawPauseOverlay() {
   addButton({ x: 62, y: 686, w: 172, h: 150 }, () => {
     soundEnabled = !soundEnabled;
     if (!soundEnabled && audio) audio.suspend();
-    if (soundEnabled && audio?.state === "suspended") audio.resume();
+    if (soundEnabled) unlockAudio();
   });
 }
 
@@ -1452,21 +1453,34 @@ function drawRestartBubble() {
   ctx.shadowColor = "rgba(255,255,255,0.86)";
   ctx.shadowBlur = 6;
   ctx.fillText(t("resetGame"), TABLE.width / 2, 108);
-  ctx.translate(TABLE.width / 2, 176);
-  ctx.strokeStyle = "#2f63bd";
-  ctx.lineWidth = 8;
+  ctx.translate(TABLE.width / 2, 182);
+  const ring = ctx.createRadialGradient(-8, -10, 4, 0, 0, 34);
+  ring.addColorStop(0, "#ffffff");
+  ring.addColorStop(0.34, "#dce8ff");
+  ring.addColorStop(0.7, "#72a3f0");
+  ring.addColorStop(1, "#2d60b5");
+  ctx.fillStyle = ring;
   ctx.beginPath();
-  ctx.arc(0, 0, 26, -0.3, Math.PI * 1.65);
+  ctx.arc(0, 0, 34, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.lineWidth = 3.5;
+  ctx.strokeStyle = "rgba(255,255,255,0.9)";
   ctx.stroke();
+  ctx.shadowBlur = 0;
   ctx.strokeStyle = "#2f63bd";
-  ctx.lineWidth = 7;
+  ctx.lineWidth = 6.5;
+  ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.beginPath();
-  ctx.moveTo(-25, -21);
-  ctx.lineTo(-2, -31);
-  ctx.lineTo(-8, -7);
-  ctx.closePath();
+  ctx.arc(0, 0, 18, -0.12, Math.PI * 1.45);
   ctx.stroke();
+  ctx.fillStyle = "#2f63bd";
+  ctx.beginPath();
+  ctx.moveTo(-18, -18);
+  ctx.lineTo(-1, -27);
+  ctx.lineTo(-5, -9);
+  ctx.closePath();
+  ctx.fill();
   ctx.restore();
 }
 
@@ -2092,6 +2106,17 @@ function unlockAudio() {
     audio = new (window.AudioContext || window.webkitAudioContext)();
   }
   if (audio.state === "suspended") audio.resume();
+  if (!audioPrimed) {
+    const gain = audio.createGain();
+    gain.gain.value = 0.00001;
+    gain.connect(audio.destination);
+    const buffer = audio.createBuffer(1, 1, audio.sampleRate);
+    const source = audio.createBufferSource();
+    source.buffer = buffer;
+    source.connect(gain);
+    source.start();
+    audioPrimed = true;
+  }
 }
 
 function playFx(kind, intensity = 0.5) {
@@ -2110,33 +2135,55 @@ function playFx(kind, intensity = 0.5) {
   }
 
   if (kind === "wall") {
-    playIceClick(now, force * 0.58, 1900, 0.045);
+    playIceClick(now, force * 0.5, 760 + force * 140, 0.07);
     return;
   }
 
-  playIceClick(now, force, 2600 + force * 1500, 0.055 + force * 0.035);
+  playIceClick(now, force, 960 + force * 220, 0.09 + force * 0.045);
 }
 
-function playIceClick(start, intensity, brightness, duration) {
-  const snapGain = audio.createGain();
-  snapGain.connect(audio.destination);
-  snapGain.gain.setValueAtTime(0.0001, start);
-  snapGain.gain.exponentialRampToValueAtTime(0.025 + intensity * 0.16, start + 0.004);
-  snapGain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+function playIceClick(start, intensity, resonance, duration) {
+  const bodyGain = audio.createGain();
+  bodyGain.connect(audio.destination);
+  bodyGain.gain.setValueAtTime(0.0001, start);
+  bodyGain.gain.exponentialRampToValueAtTime(0.02 + intensity * 0.075, start + 0.008);
+  bodyGain.gain.exponentialRampToValueAtTime(0.0001, start + duration + 0.035);
 
   const noise = audio.createBufferSource();
-  noise.buffer = makeNoiseBuffer(0.07);
-  const highpass = audio.createBiquadFilter();
-  highpass.type = "highpass";
-  highpass.frequency.setValueAtTime(brightness, start);
-  noise.connect(highpass);
-  highpass.connect(snapGain);
+  noise.buffer = makeNoiseBuffer(duration + 0.07);
+  const bandpass = audio.createBiquadFilter();
+  bandpass.type = "bandpass";
+  bandpass.frequency.setValueAtTime(resonance, start);
+  bandpass.Q.setValueAtTime(0.85 + intensity * 0.55, start);
+  const lowpass = audio.createBiquadFilter();
+  lowpass.type = "lowpass";
+  lowpass.frequency.setValueAtTime(1700 + intensity * 420, start);
+  noise.connect(bandpass);
+  bandpass.connect(lowpass);
+  lowpass.connect(bodyGain);
   noise.start(start);
-  noise.stop(start + duration);
+  noise.stop(start + duration + 0.05);
 
-  const pitch = 520 + intensity * 760;
-  tone(pitch, start, duration * 0.82, "triangle", snapGain);
-  tone(pitch * 1.9, start + 0.002, duration * 0.42, "sine", snapGain);
+  const thumpGain = audio.createGain();
+  thumpGain.connect(audio.destination);
+  thumpGain.gain.setValueAtTime(0.0001, start);
+  thumpGain.gain.exponentialRampToValueAtTime(0.03 + intensity * 0.08, start + 0.006);
+  thumpGain.gain.exponentialRampToValueAtTime(0.0001, start + duration * 0.95);
+
+  const thump = audio.createOscillator();
+  thump.type = "sine";
+  thump.frequency.setValueAtTime(230 + intensity * 48, start);
+  thump.frequency.exponentialRampToValueAtTime(148 + intensity * 22, start + duration * 0.9);
+  thump.connect(thumpGain);
+  thump.start(start);
+  thump.stop(start + duration);
+
+  const ringGain = audio.createGain();
+  ringGain.connect(audio.destination);
+  ringGain.gain.setValueAtTime(0.0001, start + 0.002);
+  ringGain.gain.exponentialRampToValueAtTime(0.012 + intensity * 0.032, start + 0.01);
+  ringGain.gain.exponentialRampToValueAtTime(0.0001, start + duration * 0.72);
+  tone(320 + intensity * 85, start + 0.002, duration * 0.62, "triangle", ringGain);
 }
 
 function playGoalDrop(start) {
