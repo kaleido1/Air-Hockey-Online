@@ -639,6 +639,7 @@ function removeFromQueue(client) {
 function updateInput(client, message) {
   const room = currentRoom(client);
   if (!room || client.playerIndex === null) return;
+  const now = Date.now();
   const requestedIndex = Number(message.playerIndex);
   const playerIndex =
     room.settings.local &&
@@ -649,23 +650,33 @@ function updateInput(client, message) {
   const mallet = room.state.mallets[playerIndex];
   const x = clamp(Number(message.x), TABLE.malletRadius, TABLE.width - TABLE.malletRadius);
   const y = clamp(Number(message.y), TABLE.malletRadius, TABLE.height - TABLE.malletRadius);
-  const constrained = constrainMallet(playerIndex, x, y);
+  let constrained = constrainMallet(playerIndex, x, y);
+  if (room.state.phase !== "playing") {
+    constrained = constrainMalletAwayFromPucks(playerIndex, constrained.x, constrained.y, room.state.pucks);
+  }
   const previousX = mallet.x;
   const previousY = mallet.y;
   const dx = constrained.x - previousX;
   const dy = constrained.y - previousY;
-  const speed = Math.hypot(dx, dy) * PHYSICS_HZ;
+  const elapsed = mallet.lastInputAt ? (now - mallet.lastInputAt) / 1000 : 1 / PHYSICS_HZ;
+  const inputDt = clamp(elapsed, 1 / 140, 1 / 30);
+  const speed = Math.hypot(dx, dy) / inputDt;
   const velocityScale = speed > HUMAN_MALLET_MAX_SPEED ? HUMAN_MALLET_MAX_SPEED / speed : 1;
-  mallet.sweepFromX = previousX;
-  mallet.sweepFromY = previousY;
+  if (!mallet.hasPendingSweep) {
+    mallet.sweepFromX = previousX;
+    mallet.sweepFromY = previousY;
+    mallet.sweepStartedAt = mallet.lastInputAt || now - inputDt * 1000;
+    mallet.hasPendingSweep = true;
+  }
   mallet.x = constrained.x;
   mallet.y = constrained.y;
   mallet.targetX = constrained.x;
   mallet.targetY = constrained.y;
-  mallet.vx = dx * PHYSICS_HZ * velocityScale;
-  mallet.vy = dy * PHYSICS_HZ * velocityScale;
-  mallet.directInputUntil = Date.now() + 90;
-  room.updatedAt = Date.now();
+  mallet.vx = (dx / inputDt) * velocityScale;
+  mallet.vy = (dy / inputDt) * velocityScale;
+  mallet.lastInputAt = now;
+  mallet.directInputUntil = now + 90;
+  room.updatedAt = now;
 }
 
 function tickRooms() {
@@ -692,8 +703,8 @@ function tickRooms() {
 
     if (room.state.phase === "point" && now >= room.state.phaseEndsAt) {
       resetPucks(room, room.state.lastScorer);
-      room.state.phase = "countdown";
-      room.state.phaseEndsAt = now + 900;
+      room.state.phase = "playing";
+      room.state.phaseEndsAt = 0;
     }
 
     if (room.state.phase === "playing") {
@@ -705,6 +716,8 @@ function tickRooms() {
     for (const mallet of room.state.mallets) {
       mallet.sweepFromX = mallet.x;
       mallet.sweepFromY = mallet.y;
+      mallet.sweepStartedAt = 0;
+      mallet.hasPendingSweep = false;
     }
   }
 }
@@ -882,6 +895,12 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   const puckStartY = Number.isFinite(puck.prevY) ? puck.prevY : puck.y;
   const sweepX = mallet.x - startX;
   const sweepY = mallet.y - startY;
+  const sweepElapsed = mallet.sweepStartedAt ? (now - mallet.sweepStartedAt) / 1000 : dt;
+  const sweepDt = clamp(sweepElapsed, dt, 1 / 24);
+  const pathVx = sweepX / sweepDt;
+  const pathVy = sweepY / sweepDt;
+  const strikeVx = Number.isFinite(pathVx) && Math.hypot(sweepX, sweepY) > 0.001 ? pathVx : mallet.vx;
+  const strikeVy = Number.isFinite(pathVy) && Math.hypot(sweepX, sweepY) > 0.001 ? pathVy : mallet.vy;
   const puckDeltaX = puck.x - puckStartX;
   const puckDeltaY = puck.y - puckStartY;
   const relativeStartX = puckStartX - startX;
@@ -905,7 +924,7 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
     const c =
       relativeStartX * relativeStartX +
       relativeStartY * relativeStartY -
-      collisionDistance * collisionDistance;
+      minDistance * minDistance;
 
     let hit = false;
     if (a > 0.000001) {
@@ -970,18 +989,18 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
     }
   }
 
-  const rvx = puck.vx - mallet.vx;
-  const rvy = puck.vy - mallet.vy;
+  const rvx = puck.vx - strikeVx;
+  const rvy = puck.vy - strikeVy;
   const relativeNormalSpeed = rvx * nx + rvy * ny;
-  const strikeSpeed = Math.max(0, mallet.vx * nx + mallet.vy * ny);
-  const malletSpeed = Math.hypot(mallet.vx, mallet.vy);
-  const moveX = malletSpeed > 0.001 ? mallet.vx / malletSpeed : nx;
-  const moveY = malletSpeed > 0.001 ? mallet.vy / malletSpeed : ny;
+  const strikeSpeed = Math.max(0, strikeVx * nx + strikeVy * ny);
+  const malletSpeed = Math.hypot(strikeVx, strikeVy);
+  const moveX = malletSpeed > 0.001 ? strikeVx / malletSpeed : nx;
+  const moveY = malletSpeed > 0.001 ? strikeVy / malletSpeed : ny;
   const puckSpeed = Math.hypot(puck.vx, puck.vy);
   const activeStaticPush =
     puckSpeed < STATIC_PUCK_SPEED &&
-    (strikeSpeed > 90 || malletSpeed > 260) &&
-    distance <= minDistance + CONTACT_SEPARATION;
+    malletSpeed > 90 &&
+    (sweptHit || distance <= minDistance + CONTACT_SEPARATION);
   let exitX = nx;
   let exitY = ny;
   if (activeStaticPush && malletSpeed > 260) {
@@ -1181,19 +1200,26 @@ function updateBot(room) {
   const mallet = room.state.mallets[1];
   const brain = updateBotBrain(room, now);
   const defensiveX = TABLE.width / 2;
-  const defensiveY = TABLE.height * 0.22;
+  const defensiveY = TABLE.height * 0.18;
+  const goalLeft = TABLE.width / 2 - TABLE.goalWidth / 2 + TABLE.malletRadius * 0.32;
+  const goalRight = TABLE.width / 2 + TABLE.goalWidth / 2 - TABLE.malletRadius * 0.32;
   let target = { x: defensiveX, y: defensiveY };
-  let speed = brain.mode === "strike" ? 4300 : brain.mode === "bait" ? 2450 : 3200;
+  let speed = brain.mode === "ambush" ? BOT_MAX_SPEED : brain.mode === "bait" ? 2450 : 3400;
 
   const servePuck = room.state.pucks.find(
     (puck) => puck.y < TABLE.height / 2 && Math.hypot(puck.vx, puck.vy) < 8
   );
   if (servePuck) {
-    const windup = Math.sin(now / 260) * 18;
-    mallet.maxSpeed = 3400;
-    mallet.targetX = clamp(servePuck.x + windup, TABLE.malletRadius, TABLE.width - TABLE.malletRadius);
+    const windup = Math.sin(now / 180) * (brain.mode === "ambush" ? 42 : 18);
+    const fakePause = brain.mode === "bait" && now < brain.nextDecisionAt - 260;
+    mallet.maxSpeed = fakePause ? 1700 : brain.mode === "ambush" ? BOT_MAX_SPEED : 3600;
+    mallet.targetX = clamp(
+      servePuck.x + windup + (brain.mode === "ambush" ? brain.side * 22 : 0),
+      TABLE.malletRadius,
+      TABLE.width - TABLE.malletRadius
+    );
     mallet.targetY = clamp(
-      servePuck.y - (TABLE.malletRadius + TABLE.puckRadius - 12),
+      servePuck.y - (TABLE.malletRadius + TABLE.puckRadius - (brain.mode === "ambush" ? 26 : 12)),
       TABLE.malletRadius,
       TABLE.height / 2 - TABLE.malletRadius - 8
     );
@@ -1201,43 +1227,71 @@ function updateBot(room) {
   }
 
   const threats = room.state.pucks
-    .filter((puck) => puck.y < TABLE.height * 0.62 || puck.vy < -80)
-    .sort((a, b) => a.y - b.y);
+    .filter((puck) => puck.y < TABLE.height * 0.66 || puck.vy < -70)
+    .map((puck) => {
+      const timeToGoalLine =
+        puck.vy < -40 ? clamp((puck.y - (TABLE.puckRadius + 18)) / -puck.vy, 0, 0.82) : 0.32;
+      const predictedX = predictPuckXAtY(puck, TABLE.puckRadius + 28);
+      const danger =
+        (puck.vy < -90 ? 3 : 0) +
+        (puck.y < TABLE.height * 0.38 ? 2 : 0) +
+        (predictedX > goalLeft - 34 && predictedX < goalRight + 34 ? 3 : 0) +
+        Math.max(0, 1 - timeToGoalLine) * 2;
+      return { puck, predictedX, danger, timeToGoalLine };
+    })
+    .sort((a, b) => b.danger - a.danger || a.puck.y - b.puck.y);
 
   if (threats.length > 0) {
-    const puck = threats[0];
+    const threat = threats[0];
+    const puck = threat.puck;
     const puckSpeed = Math.hypot(puck.vx, puck.vy);
-    const interceptBias = puck.vy < 0 ? 0.14 : 0.06;
-    const laneOffset =
-      brain.mode === "bait" ? brain.side * 76 : brain.mode === "strike" ? brain.side * 34 : 0;
-    const attackY =
-      brain.mode === "strike" && puck.y < TABLE.height * 0.49 && puck.vy > -180
-        ? puck.y + 24
-        : puck.y - 86;
+    const mustGuard = threat.danger > 4.2 || puck.y < TABLE.height * 0.32 || puck.vy < -260;
+    const interceptBias = puck.vy < 0 ? clamp(threat.timeToGoalLine * 0.42, 0.07, 0.26) : 0.05;
+    const surpriseLane =
+      brain.mode === "ambush" && !mustGuard ? brain.side * (58 + Math.sin(now / 160) * 16) : 0;
 
-    target = {
-      x: clamp(
-        puck.x + puck.vx * interceptBias + laneOffset,
-        TABLE.malletRadius,
-        TABLE.width - TABLE.malletRadius
-      ),
-      y: clamp(attackY, TABLE.malletRadius, TABLE.height / 2 - TABLE.malletRadius - 8)
-    };
-    speed =
-      brain.mode === "strike"
-        ? clamp(3100 + puckSpeed * 0.58, 3300, BOT_MAX_SPEED)
-        : brain.mode === "bait"
-          ? clamp(2050 + puckSpeed * 0.22, BOT_MIN_SPEED, 2850)
-          : clamp(2550 + puckSpeed * 0.35, 2600, 3700);
+    if (mustGuard) {
+      const guardX = clamp(threat.predictedX + puck.vx * 0.035, goalLeft, goalRight);
+      target = {
+        x: guardX,
+        y: clamp(TABLE.height * 0.13 + Math.abs(guardX - defensiveX) * 0.05, TABLE.malletRadius, TABLE.height * 0.24)
+      };
+      speed = clamp(3600 + puckSpeed * 0.72, 3900, BOT_MAX_SPEED);
+    } else {
+      const attackY =
+        brain.mode === "ambush" && puck.y < TABLE.height * 0.5 && puck.vy > -220
+          ? puck.y + 38
+          : puck.y - (brain.mode === "bait" ? 116 : 84);
+
+      target = {
+        x: clamp(
+          puck.x + puck.vx * interceptBias + surpriseLane,
+          TABLE.malletRadius,
+          TABLE.width - TABLE.malletRadius
+        ),
+        y: clamp(attackY, TABLE.malletRadius, TABLE.height / 2 - TABLE.malletRadius - 8)
+      };
+      speed =
+        brain.mode === "ambush"
+          ? clamp(3600 + puckSpeed * 0.72, 3900, BOT_MAX_SPEED)
+          : brain.mode === "bait"
+            ? clamp(1900 + puckSpeed * 0.2, BOT_MIN_SPEED, 2750)
+            : clamp(2850 + puckSpeed * 0.42, 3000, 3950);
+    }
   } else if (brain.mode === "bait") {
     target = {
-      x: clamp(defensiveX + brain.side * 96, TABLE.malletRadius, TABLE.width - TABLE.malletRadius),
-      y: TABLE.height * 0.25
+      x: clamp(defensiveX + brain.side * 88, goalLeft, goalRight),
+      y: TABLE.height * 0.2
+    };
+  } else if (brain.mode === "ambush") {
+    target = {
+      x: clamp(defensiveX + brain.side * 122, TABLE.malletRadius, TABLE.width - TABLE.malletRadius),
+      y: TABLE.height * 0.28
     };
   }
 
-  target.x += Math.sin(now / 420 + brain.side) * (brain.mode === "strike" ? 8 : 18);
-  target.y += Math.cos(now / 520) * (brain.mode === "bait" ? 10 : 5);
+  target.x += Math.sin(now / brain.tempo + brain.side) * (brain.mode === "ambush" ? 24 : 10);
+  target.y += Math.cos(now / (brain.tempo * 1.22)) * (brain.mode === "bait" ? 12 : 6);
   mallet.maxSpeed = speed;
   mallet.targetX = target.x;
   mallet.targetY = target.y;
@@ -1246,14 +1300,28 @@ function updateBot(room) {
 function updateBotBrain(room, now) {
   if (!room.botBrain || now >= room.botBrain.nextDecisionAt) {
     const roll = Math.random();
-    const mode = roll > 0.78 ? "strike" : roll > 0.48 ? "bait" : "guard";
+    const mode = roll > 0.68 ? "ambush" : roll > 0.42 ? "bait" : "guard";
     room.botBrain = {
       mode,
       side: Math.random() > 0.5 ? 1 : -1,
-      nextDecisionAt: now + 650 + Math.random() * 950
+      tempo: 150 + Math.random() * 420,
+      nextDecisionAt: now + (mode === "ambush" ? 360 : 620) + Math.random() * (mode === "ambush" ? 460 : 920)
     };
   }
   return room.botBrain;
+}
+
+function predictPuckXAtY(puck, targetY) {
+  if (Math.abs(puck.vy) < 0.001) return puck.x;
+  const t = (targetY - puck.y) / puck.vy;
+  if (t < 0) return puck.x;
+  let x = puck.x + puck.vx * t;
+  const minX = TABLE.puckRadius;
+  const maxX = TABLE.width - TABLE.puckRadius;
+  const span = maxX - minX;
+  if (span <= 0) return clamp(x, minX, maxX);
+  x = minX + Math.abs((((x - minX) % (span * 2)) + span * 2) % (span * 2));
+  return x > maxX ? maxX - (x - maxX) : x;
 }
 
 function resetPucks(room, scorer) {
@@ -1264,15 +1332,79 @@ function resetPucks(room, scorer) {
   room.state.pucks = [];
   for (let index = 0; index < count; index += 1) {
     const offset = count === 1 ? 0 : index === 0 ? -58 : 58;
+    const position = chooseSafeServePosition(
+      room.state,
+      TABLE.width / 2 + offset,
+      serveY + (count === 1 ? 0 : index === 0 ? -18 : 18),
+      server
+    );
     room.state.pucks.push({
       id: `p${index}`,
-      x: TABLE.width / 2 + offset,
-      y: serveY + (count === 1 ? 0 : index === 0 ? -18 : 18),
+      x: position.x,
+      y: position.y,
       vx: 0,
       vy: 0,
-      stuckFor: 0
+      stuckFor: 0,
+      lastMalletHitIndex: null,
+      lastMalletHitAt: 0
     });
   }
+}
+
+function chooseSafeServePosition(state, preferredX, preferredY, server) {
+  const r = TABLE.puckRadius;
+  const top = server === 0 ? TABLE.height / 2 + r + 12 : r + 12;
+  const bottom = server === 0 ? TABLE.height - r - 12 : TABLE.height / 2 - r - 12;
+  const safeDistance = TABLE.malletRadius + TABLE.puckRadius + CONTACT_SEPARATION + 12;
+  const puckDistance = TABLE.puckRadius * 2 + 16;
+  const centerX = TABLE.width / 2;
+  const laneStep = 54;
+  const rowStep = 46;
+  const candidates = [];
+
+  for (const row of [0, 1, -1, 2, -2, 3, -3, 4, -4]) {
+    for (const lane of [0, -1, 1, -2, 2, -3, 3, -4, 4]) {
+      candidates.push({
+        x: clamp(preferredX + lane * laneStep, r + 12, TABLE.width - r - 12),
+        y: clamp(preferredY + row * rowStep, top, bottom)
+      });
+    }
+  }
+
+  const valid = candidates.find((candidate) =>
+    isSafeServeCandidate(candidate, state, safeDistance, puckDistance)
+  );
+  if (valid) return valid;
+
+  let fallback = { x: clamp(preferredX, r + 12, TABLE.width - r - 12), y: clamp(preferredY, top, bottom) };
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    for (const mallet of state.mallets || []) {
+      let dx = fallback.x - mallet.x;
+      let dy = fallback.y - mallet.y;
+      let distance = Math.hypot(dx, dy);
+      if (distance >= safeDistance) continue;
+      if (distance <= 0.001) {
+        dx = fallback.x < centerX ? -0.55 : 0.55;
+        dy = server === 0 ? 1 : -1;
+        distance = Math.hypot(dx, dy);
+      }
+      fallback = {
+        x: clamp(mallet.x + (dx / distance) * safeDistance, r + 12, TABLE.width - r - 12),
+        y: clamp(mallet.y + (dy / distance) * safeDistance, top, bottom)
+      };
+    }
+  }
+  return fallback;
+}
+
+function isSafeServeCandidate(candidate, state, malletDistance, puckDistance) {
+  for (const mallet of state.mallets || []) {
+    if (Math.hypot(candidate.x - mallet.x, candidate.y - mallet.y) < malletDistance) return false;
+  }
+  for (const puck of state.pucks || []) {
+    if (Math.hypot(candidate.x - puck.x, candidate.y - puck.y) < puckDistance) return false;
+  }
+  return true;
 }
 
 function initialState(puckCount = 1) {
@@ -1291,7 +1423,10 @@ function initialState(puckCount = 1) {
         sweepFromX: TABLE.width / 2,
         sweepFromY: TABLE.height * 0.78,
         vx: 0,
-        vy: 0
+        vy: 0,
+        lastInputAt: 0,
+        sweepStartedAt: 0,
+        hasPendingSweep: false
       },
       {
         x: TABLE.width / 2,
@@ -1301,7 +1436,10 @@ function initialState(puckCount = 1) {
         sweepFromX: TABLE.width / 2,
         sweepFromY: TABLE.height * 0.22,
         vx: 0,
-        vy: 0
+        vy: 0,
+        lastInputAt: 0,
+        sweepStartedAt: 0,
+        hasPendingSweep: false
       }
     ],
     pucks: []
@@ -1330,6 +1468,9 @@ function centerMallets(state) {
     mallet.sweepFromY = starts[index].y;
     mallet.vx = 0;
     mallet.vy = 0;
+    mallet.lastInputAt = 0;
+    mallet.sweepStartedAt = 0;
+    mallet.hasPendingSweep = false;
   });
 }
 
@@ -1497,6 +1638,31 @@ function constrainMallet(index, x, y) {
     x: clamp(x, r, TABLE.width - r),
     y: clamp(y, top, bottom)
   };
+}
+
+function constrainMalletAwayFromPucks(index, x, y, pucks) {
+  let point = constrainMallet(index, x, y);
+  const minDistance = TABLE.malletRadius + TABLE.puckRadius + CONTACT_SEPARATION;
+  for (const puck of pucks || []) {
+    let dx = point.x - puck.x;
+    let dy = point.y - puck.y;
+    let distance = Math.hypot(dx, dy);
+    if (distance >= minDistance) continue;
+
+    if (distance <= 0.001) {
+      const homeY = index === 0 ? 1 : -1;
+      dx = 0;
+      dy = homeY;
+      distance = 1;
+    }
+
+    point = constrainMallet(
+      index,
+      puck.x + (dx / distance) * minDistance,
+      puck.y + (dy / distance) * minDistance
+    );
+  }
+  return point;
 }
 
 function capPuckSpeed(puck) {

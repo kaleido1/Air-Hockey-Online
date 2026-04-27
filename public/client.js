@@ -228,6 +228,8 @@ const activePointers = new Map();
 const touchCapable = navigator.maxTouchPoints > 0 || "ontouchstart" in window;
 let lastCenterTapAt = 0;
 let renderScale = 1;
+let lastRenderFrameAt = 0;
+let renderBudgetMs = 1000 / 60;
 let tableCache = null;
 let malletSprite = null;
 let puckSprite = null;
@@ -236,6 +238,7 @@ let currentCursor = "";
 const predictedMallets = new Map();
 const LOCAL_PREDICTION_WINDOW_MS = 90;
 const LOCAL_CONTACT_SEPARATION = 0.75;
+const ENABLE_LOCAL_PUCK_PREDICTION = false;
 
 applyLanguage();
 connect();
@@ -448,7 +451,6 @@ function handleMessage(message) {
       }
       updateScoreboard(message);
       if (!(roomMinimized && message.state.phase === "waiting")) updatePhaseText();
-      updateTrails();
       if (["playing", "countdown", "point", "gameover", "paused"].includes(message.state.phase)) {
         roomMinimized = false;
         showUi(null);
@@ -693,7 +695,10 @@ function sendPointer(event, force, overridePlayerIndex = null) {
   const targetIndex = overridePlayerIndex === 0 || overridePlayerIndex === 1 ? overridePlayerIndex : playerIndex;
   if (!force && now - lastInputAtByPlayer[targetIndex] < 1000 / 120) return;
   lastInputAtByPlayer[targetIndex] = now;
-  const constrained = constrainForPlayer(targetIndex, point.x, point.y);
+  let constrained = constrainForPlayer(targetIndex, point.x, point.y);
+  if (serverState?.phase !== "playing") {
+    constrained = constrainMalletAwayFromPucks(targetIndex, constrained.x, constrained.y, serverState?.pucks || []);
+  }
   const previousPredicted = predictedMallets.get(targetIndex);
   const fromX = previousPredicted?.x ?? serverState?.mallets?.[targetIndex]?.x ?? constrained.x;
   const fromY = previousPredicted?.y ?? serverState?.mallets?.[targetIndex]?.y ?? constrained.y;
@@ -706,7 +711,9 @@ function sendPointer(event, force, overridePlayerIndex = null) {
     y: constrained.y,
     expiresAt: performance.now() + 180
   });
-  applyLocalStrikePrediction(targetIndex, fromX, fromY, constrained.x, constrained.y, now);
+  if (ENABLE_LOCAL_PUCK_PREDICTION) {
+    applyLocalStrikePrediction(targetIndex, fromX, fromY, constrained.x, constrained.y, now);
+  }
   send({ type: "input", x: constrained.x, y: constrained.y, playerIndex: targetIndex });
 }
 
@@ -733,7 +740,7 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
     const c =
       relativeStartX * relativeStartX +
       relativeStartY * relativeStartY -
-      collisionDistance * collisionDistance;
+      minDistance * minDistance;
     let hitT = null;
 
     if (finalDistance <= collisionDistance && malletSpeed > 260) {
@@ -818,6 +825,30 @@ function constrainForPlayer(index, x, y) {
     x: clamp(x, r, TABLE.width - r),
     y: clamp(y, top, bottom)
   };
+}
+
+function constrainMalletAwayFromPucks(index, x, y, pucks) {
+  let point = constrainForPlayer(index, x, y);
+  const minDistance = TABLE.malletRadius + TABLE.puckRadius + LOCAL_CONTACT_SEPARATION;
+  for (const puck of pucks || []) {
+    let dx = point.x - puck.x;
+    let dy = point.y - puck.y;
+    let distance = Math.hypot(dx, dy);
+    if (distance >= minDistance) continue;
+
+    if (distance <= 0.001) {
+      dx = 0;
+      dy = index === 0 ? 1 : -1;
+      distance = 1;
+    }
+
+    point = constrainForPlayer(
+      index,
+      puck.x + (dx / distance) * minDistance,
+      puck.y + (dy / distance) * minDistance
+    );
+  }
+  return point;
 }
 
 function send(message) {
@@ -1041,7 +1072,8 @@ function easeOutCubic(value) {
 }
 
 function resizeCanvas() {
-  const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+  const maxDpr = touchCapable ? 1.35 : 1.75;
+  const dpr = Math.max(1, Math.min(maxDpr, window.devicePixelRatio || 1));
   if (renderScale !== dpr) {
     renderScale = dpr;
     tableCache = null;
@@ -1052,12 +1084,25 @@ function resizeCanvas() {
   canvas.height = Math.round(TABLE.height * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
+  ctx.imageSmoothingQuality = touchCapable ? "medium" : "high";
   canvasMetrics = null;
   requestAnimationFrame(measureCanvas);
 }
 
-function render() {
+function render(frameTime = performance.now()) {
+  requestAnimationFrame(render);
+  const targetFrameMs = 1000 / 60;
+  if (!lastRenderFrameAt) {
+    lastRenderFrameAt = frameTime;
+    renderBudgetMs = 0;
+  } else {
+    const elapsed = Math.min(100, Math.max(0, frameTime - lastRenderFrameAt));
+    lastRenderFrameAt = frameTime;
+    renderBudgetMs += elapsed;
+    if (renderBudgetMs < targetFrameMs) return;
+    renderBudgetMs %= targetFrameMs;
+  }
+
   const state = serverState || demoState();
   const nextCursor = isActivePlay() ? "none" : "default";
   if (currentCursor !== nextCursor) {
@@ -1078,7 +1123,6 @@ function render() {
 
   drawCanvasScores(state);
   drawGameOverlay(state);
-  requestAnimationFrame(render);
 }
 
 function drawGameOverlay(state) {
