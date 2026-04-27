@@ -197,8 +197,7 @@ window.addEventListener("keydown", (event) => {
 
 function connect() {
   clearTimeout(reconnectTimer);
-  const protocol = location.protocol === "https:" ? "wss" : "ws";
-  socket = new WebSocket(`${protocol}://${location.host}/ws`);
+  socket = new WebSocket(getWebSocketUrl());
 
   socket.addEventListener("open", () => {
     connected = true;
@@ -228,6 +227,13 @@ function connect() {
   socket.addEventListener("error", () => {
     els.connectionStatus.textContent = "Error";
   });
+}
+
+function getWebSocketUrl() {
+  const configuredUrl = String(window.AIR_HOCKEY_SERVER_URL || "").trim();
+  const base = configuredUrl ? new URL(configuredUrl) : location;
+  const protocol = base.protocol === "https:" ? "wss" : "ws";
+  return `${protocol}://${base.host}/ws`;
 }
 
 function handleMessage(message) {
