@@ -709,6 +709,7 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
   const malletRadius = TABLE.malletRadius;
   const puckRadius = TABLE.puckRadius;
   const minDistance = malletRadius + puckRadius;
+  const contactSkin = 1.5;
   const sweepX = toX - fromX;
   const sweepY = toY - fromY;
   const malletSpeed = Math.hypot(sweepX, sweepY) * 120;
@@ -716,6 +717,9 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
 
   for (const puck of serverState.pucks) {
     if (puck.localPredictedAt && now - puck.localPredictedAt < 22) continue;
+    const finalDistance = Math.hypot(puck.x - toX, puck.y - toY);
+    if (finalDistance > minDistance + contactSkin) continue;
+
     const relativeStartX = puck.x - fromX;
     const relativeStartY = puck.y - fromY;
     const a = sweepX * sweepX + sweepY * sweepY;
@@ -977,7 +981,7 @@ function scheduleGameoverReturn() {
   gameoverReturnTimer = setTimeout(() => {
     gameoverReturnTimer = 0;
     if (serverState?.phase !== "gameover") return;
-    send({ type: "leave" });
+    send({ type: "leaveToMenu" });
     clearRoom();
   }, 2200);
 }
@@ -1523,12 +1527,13 @@ function drawRestartBubble() {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.font = "800 30px Arial, sans-serif";
-  ctx.fillStyle = "#1a6dff";
-  ctx.shadowColor = "rgba(255,255,255,0.86)";
-  ctx.shadowBlur = 6;
+  ctx.fillStyle = "#ffffff";
+  ctx.shadowColor = "rgba(46,102,190,0.72)";
+  ctx.shadowBlur = 12;
   ctx.fillText(t("resetGame"), TABLE.width / 2, 108);
   ctx.translate(TABLE.width / 2, 182);
-  ctx.shadowBlur = 0;
+  ctx.shadowColor = "rgba(255,255,255,0.95)";
+  ctx.shadowBlur = 10;
 
   // Standard circular restart icon (↻)
   const r = 19;
@@ -1539,7 +1544,7 @@ function drawRestartBubble() {
   const arcStart = gapCenter + halfGap;
   const arcEnd = gapCenter - halfGap;
 
-  ctx.strokeStyle = "#1a6dff";
+  ctx.strokeStyle = "#ffffff";
   ctx.lineWidth = lw;
   ctx.lineCap = "round";
   ctx.beginPath();
@@ -1556,7 +1561,7 @@ function drawRestartBubble() {
   const aLen = 11;
   const aW = 6;
 
-  ctx.fillStyle = "#1a6dff";
+  ctx.fillStyle = "#ffffff";
   ctx.beginPath();
   ctx.moveTo(tipX + tx * aLen, tipY + ty * aLen);
   ctx.lineTo(tipX - nx * aW, tipY - ny * aW);

@@ -271,6 +271,38 @@ h1 {
   font-size: 0.9rem;
 }
 
+#restartButton {
+  border-color: rgba(255, 255, 255, 0.88);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(238, 245, 255, 0.9)),
+    #ffffff;
+  color: #16386d;
+  font-weight: 900;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.45) inset,
+    0 8px 18px rgba(76, 116, 180, 0.24),
+    0 0 20px rgba(255, 255, 255, 0.32);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+#restartButton:hover:not(:disabled) {
+  border-color: #ffffff;
+  background:
+    linear-gradient(180deg, #ffffff, rgba(226, 239, 255, 0.96)),
+    #ffffff;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.72) inset,
+    0 10px 22px rgba(76, 116, 180, 0.32),
+    0 0 26px rgba(255, 255, 255, 0.5);
+}
+
+#restartButton:disabled {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(224, 232, 244, 0.78)),
+    #ffffff;
+  color: rgba(22, 56, 109, 0.58);
+}
+
 .meta {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
