@@ -1546,13 +1546,13 @@ function drawRestartBubble() {
   ctx.arc(0, 0, r, arcStart, arcEnd, false);
   ctx.stroke();
 
-  // Arrowhead at arcStart pointing clockwise (into the gap)
-  const tipX = r * Math.cos(arcStart);
-  const tipY = r * Math.sin(arcStart);
-  const tx = -Math.sin(arcStart);
-  const ty = Math.cos(arcStart);
-  const nx = Math.cos(arcStart);
-  const ny = Math.sin(arcStart);
+  // Arrowhead at arcEnd pointing clockwise (into the gap)
+  const tipX = r * Math.cos(arcEnd);
+  const tipY = r * Math.sin(arcEnd);
+  const tx = -Math.sin(arcEnd);
+  const ty = Math.cos(arcEnd);
+  const nx = Math.cos(arcEnd);
+  const ny = Math.sin(arcEnd);
   const aLen = 11;
   const aW = 6;
 
