@@ -701,8 +701,10 @@ function stepPucks(room, dt) {
     puck.y += puck.vy * dt;
 
     collidePuckWithWalls(room, puck);
-    if (collidePuckWithMallet(room, puck, state.mallets[0])) emitFx(room, "hit");
-    if (collidePuckWithMallet(room, puck, state.mallets[1])) emitFx(room, "hit");
+    const hitA = collidePuckWithMallet(room, puck, state.mallets[0]);
+    if (hitA) emitFx(room, "hit", false, hitA);
+    const hitB = collidePuckWithMallet(room, puck, state.mallets[1]);
+    if (hitB) emitFx(room, "hit", false, hitB);
     collidePuckWithWalls(room, puck);
     rescueStuckPuck(room, puck, dt);
     capPuckSpeed(puck);
@@ -720,7 +722,8 @@ function stepPucks(room, dt) {
   if (state.pucks.length > 1) {
     for (let a = 0; a < state.pucks.length; a += 1) {
       for (let b = a + 1; b < state.pucks.length; b += 1) {
-        if (collidePucks(state.pucks[a], state.pucks[b])) emitFx(room, "hit");
+        const puckHit = collidePucks(state.pucks[a], state.pucks[b]);
+        if (puckHit) emitFx(room, "hit", false, puckHit);
         collidePuckWithWalls(room, state.pucks[a]);
         collidePuckWithWalls(room, state.pucks[b]);
       }
@@ -735,12 +738,15 @@ function collidePuckWithWalls(room, puck) {
   const goalLeft = TABLE.width / 2 - TABLE.goalWidth / 2;
   const goalRight = TABLE.width / 2 + TABLE.goalWidth / 2;
   let bounced = false;
+  let intensity = 0;
 
   if (puck.x < r) {
+    intensity = Math.max(intensity, Math.abs(puck.vx) / PUCK_MAX_SPEED);
     puck.x = r;
     puck.vx = Math.abs(puck.vx) * WALL_RESTITUTION;
     bounced = true;
   } else if (puck.x > TABLE.width - r) {
+    intensity = Math.max(intensity, Math.abs(puck.vx) / PUCK_MAX_SPEED);
     puck.x = TABLE.width - r;
     puck.vx = -Math.abs(puck.vx) * WALL_RESTITUTION;
     bounced = true;
@@ -749,16 +755,18 @@ function collidePuckWithWalls(room, puck) {
   const insideGoal = puck.x > goalLeft && puck.x < goalRight;
 
   if (puck.y < r && !insideGoal) {
+    intensity = Math.max(intensity, Math.abs(puck.vy) / PUCK_MAX_SPEED);
     puck.y = r;
     puck.vy = Math.abs(puck.vy) * WALL_RESTITUTION;
     bounced = true;
   } else if (puck.y > TABLE.height - r && !insideGoal) {
+    intensity = Math.max(intensity, Math.abs(puck.vy) / PUCK_MAX_SPEED);
     puck.y = TABLE.height - r;
     puck.vy = -Math.abs(puck.vy) * WALL_RESTITUTION;
     bounced = true;
   }
 
-  if (bounced) emitFx(room, "wall");
+  if (bounced) emitFx(room, "wall", false, clamp(intensity, 0.12, 0.88));
 }
 
 function rescueStuckPuck(room, puck, dt) {
@@ -791,7 +799,7 @@ function rescueStuckPuck(room, puck, dt) {
   puck.vy = (awayY / length) * Math.max(kick, Math.abs(puck.vy), PUCK_MIN_LIVE_SPEED);
   puck.stuckFor = 0;
   room.updatedAt = Date.now();
-  emitFx(room, "wall", true);
+  emitFx(room, "wall", true, 0.28);
 }
 
 function collidePuckWithMallet(room, puck, mallet) {
@@ -810,19 +818,20 @@ function collidePuckWithMallet(room, puck, mallet) {
   const rvx = puck.vx - mallet.vx;
   const rvy = puck.vy - mallet.vy;
   const closingSpeed = rvx * nx + rvy * ny;
+  const strikeSpeed = Math.max(0, mallet.vx * nx + mallet.vy * ny);
+  const intensity = clamp((Math.max(0, -closingSpeed) + strikeSpeed * 0.72) / 2100, 0.16, 1);
 
   if (closingSpeed < 0) {
     puck.vx -= (1 + PUCK_RESTITUTION) * closingSpeed * nx;
     puck.vy -= (1 + PUCK_RESTITUTION) * closingSpeed * ny;
   }
 
-  const strikeSpeed = Math.max(0, mallet.vx * nx + mallet.vy * ny);
   puck.vx += nx * (160 + strikeSpeed * 0.85) + mallet.vx * 0.18;
   puck.vy += ny * (160 + strikeSpeed * 0.85) + mallet.vy * 0.18;
 
   capPuckSpeed(puck);
   room.updatedAt = Date.now();
-  return true;
+  return intensity;
 }
 
 function collidePucks(a, b) {
@@ -843,7 +852,8 @@ function collidePucks(a, b) {
   const dvx = b.vx - a.vx;
   const dvy = b.vy - a.vy;
   const impact = dvx * nx + dvy * ny;
-  if (impact > 0) return true;
+  if (impact > 0) return 0;
+  const intensity = clamp(Math.abs(impact) / 1800, 0.12, 0.82);
 
   const impulse = -(1 + PUCK_RESTITUTION) * impact * 0.5;
   a.vx -= impulse * nx;
@@ -852,7 +862,7 @@ function collidePucks(a, b) {
   b.vy += impulse * ny;
   capPuckSpeed(a);
   capPuckSpeed(b);
-  return true;
+  return intensity;
 }
 
 function detectGoal(puck) {
@@ -874,7 +884,6 @@ function awardScoredPucks(room, scorers) {
     state.scores[scorer] = Math.min(TABLE.firstTo, state.scores[scorer] + 1);
     state.lastScorer = scorer;
     lastScorer = scorer;
-    emitFx(room, "score", true);
 
     if (state.scores[scorer] >= TABLE.firstTo) {
       state.phase = "gameover";
@@ -1089,14 +1098,14 @@ function cleanupRooms() {
   }
 }
 
-function emitFx(room, kind, force = false) {
+function emitFx(room, kind, force = false, intensity = 0.5) {
   const now = Date.now();
   const key = kind;
   const lastAt = room.lastFxAt.get(key) || 0;
   const minGap = kind === "wall" ? 75 : kind === "hit" ? 55 : 0;
   if (!force && now - lastAt < minGap) return;
   room.lastFxAt.set(key, now);
-  broadcastRoom(room, { type: "fx", kind });
+  broadcastRoom(room, { type: "fx", kind, intensity: round(clamp(intensity, 0, 1)) });
 }
 
 function broadcastRoom(room, message) {

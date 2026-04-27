@@ -425,7 +425,11 @@ function handleMessage(message) {
       if (serverState.phase !== lastPhase) {
         lastPhase = serverState.phase;
         phaseChangedAt = performance.now();
-        if (serverState.phase === "gameover") scheduleGameoverReturn();
+        if (serverState.phase === "gameover") {
+          scheduleGameoverReturn();
+          const self = playerIndex === 1 ? 1 : 0;
+          if (serverState.winner === self) playFx("victory", 1);
+        }
         if (serverState.phase === "paused" || serverState.phase === "gameover") clearControls();
         if (serverState.phase !== "gameover" && gameoverReturnTimer) {
           clearTimeout(gameoverReturnTimer);
@@ -442,10 +446,10 @@ function handleMessage(message) {
       }
       break;
     case "score":
-      playFx("score");
+      playFx("score", 1);
       break;
     case "fx":
-      playFx(message.kind);
+      playFx(message.kind, message.intensity);
       break;
     case "notice":
       if (message.message === "Opponent left the room") {
@@ -1469,7 +1473,7 @@ function drawRestartBubble() {
 function drawSpeakerIcon(x, y, on) {
   ctx.save();
   ctx.translate(x, y);
-  ctx.fillStyle = on ? "rgba(35,51,82,0.62)" : "rgba(35,51,82,0.34)";
+  ctx.fillStyle = "rgba(35,51,82,0.62)";
   ctx.beginPath();
   ctx.moveTo(-62, -28);
   ctx.lineTo(-28, -28);
@@ -1482,10 +1486,12 @@ function drawSpeakerIcon(x, y, on) {
   ctx.strokeStyle = ctx.fillStyle;
   ctx.lineWidth = 11;
   ctx.lineCap = "round";
-  for (let index = 0; index < 3; index += 1) {
-    ctx.beginPath();
-    ctx.arc(30, 0, 26 + index * 28, -0.65, 0.65);
-    ctx.stroke();
+  if (on) {
+    for (let index = 0; index < 3; index += 1) {
+      ctx.beginPath();
+      ctx.arc(30, 0, 26 + index * 28, -0.65, 0.65);
+      ctx.stroke();
+    }
   }
   ctx.restore();
 }
@@ -2088,27 +2094,91 @@ function unlockAudio() {
   if (audio.state === "suspended") audio.resume();
 }
 
-function playFx(kind) {
-  if (!audio) return;
+function playFx(kind, intensity = 0.5) {
+  if (!audio || !soundEnabled) return;
   const now = audio.currentTime;
-  const gain = audio.createGain();
-  gain.connect(audio.destination);
+  const force = clamp(Number(intensity) || 0.5, 0, 1);
 
   if (kind === "score") {
-    gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(0.22, now + 0.015);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.45);
-    tone(196, now, 0.18, "triangle", gain);
-    tone(294, now + 0.08, 0.22, "triangle", gain);
-    tone(392, now + 0.17, 0.24, "triangle", gain);
+    playGoalDrop(now);
     return;
   }
 
-  const frequency = kind === "wall" ? 160 : 260;
-  gain.gain.setValueAtTime(0.0001, now);
-  gain.gain.exponentialRampToValueAtTime(kind === "wall" ? 0.06 : 0.1, now + 0.006);
-  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
-  tone(frequency, now, 0.08, "square", gain);
+  if (kind === "victory") {
+    playVictoryCheer(now);
+    return;
+  }
+
+  if (kind === "wall") {
+    playIceClick(now, force * 0.58, 1900, 0.045);
+    return;
+  }
+
+  playIceClick(now, force, 2600 + force * 1500, 0.055 + force * 0.035);
+}
+
+function playIceClick(start, intensity, brightness, duration) {
+  const snapGain = audio.createGain();
+  snapGain.connect(audio.destination);
+  snapGain.gain.setValueAtTime(0.0001, start);
+  snapGain.gain.exponentialRampToValueAtTime(0.025 + intensity * 0.16, start + 0.004);
+  snapGain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+
+  const noise = audio.createBufferSource();
+  noise.buffer = makeNoiseBuffer(0.07);
+  const highpass = audio.createBiquadFilter();
+  highpass.type = "highpass";
+  highpass.frequency.setValueAtTime(brightness, start);
+  noise.connect(highpass);
+  highpass.connect(snapGain);
+  noise.start(start);
+  noise.stop(start + duration);
+
+  const pitch = 520 + intensity * 760;
+  tone(pitch, start, duration * 0.82, "triangle", snapGain);
+  tone(pitch * 1.9, start + 0.002, duration * 0.42, "sine", snapGain);
+}
+
+function playGoalDrop(start) {
+  const gain = audio.createGain();
+  gain.connect(audio.destination);
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(0.18, start + 0.025);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.62);
+
+  const slide = audio.createOscillator();
+  slide.type = "triangle";
+  slide.frequency.setValueAtTime(360, start);
+  slide.frequency.exponentialRampToValueAtTime(88, start + 0.42);
+  slide.connect(gain);
+  slide.start(start);
+  slide.stop(start + 0.48);
+
+  playIceClick(start + 0.04, 0.42, 1500, 0.05);
+  playIceClick(start + 0.28, 0.78, 900, 0.12);
+}
+
+function playVictoryCheer(start) {
+  const cheerGain = audio.createGain();
+  cheerGain.connect(audio.destination);
+  cheerGain.gain.setValueAtTime(0.0001, start);
+  cheerGain.gain.exponentialRampToValueAtTime(0.12, start + 0.05);
+  cheerGain.gain.exponentialRampToValueAtTime(0.0001, start + 1.15);
+
+  const noise = audio.createBufferSource();
+  noise.buffer = makeNoiseBuffer(1.15);
+  const bandpass = audio.createBiquadFilter();
+  bandpass.type = "bandpass";
+  bandpass.frequency.setValueAtTime(1150, start);
+  bandpass.Q.setValueAtTime(0.8, start);
+  noise.connect(bandpass);
+  bandpass.connect(cheerGain);
+  noise.start(start);
+  noise.stop(start + 1.15);
+
+  [523, 659, 784, 1046].forEach((frequency, index) => {
+    tone(frequency, start + index * 0.08, 0.18, "triangle", cheerGain);
+  });
 }
 
 function tone(frequency, start, duration, type, destination) {
@@ -2118,6 +2188,16 @@ function tone(frequency, start, duration, type, destination) {
   oscillator.connect(destination);
   oscillator.start(start);
   oscillator.stop(start + duration);
+}
+
+function makeNoiseBuffer(duration) {
+  const sampleRate = audio.sampleRate;
+  const buffer = audio.createBuffer(1, Math.max(1, Math.floor(sampleRate * duration)), sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let index = 0; index < data.length; index += 1) {
+    data[index] = (Math.random() * 2 - 1) * (1 - index / data.length);
+  }
+  return buffer;
 }
 
 function clamp(value, min, max) {
