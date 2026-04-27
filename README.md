@@ -1,39 +1,45 @@
 # Air Hockey Online
 
-Air Hockey Online is a browser-based air hockey game with polished arcade-style visuals, responsive touch controls, AI practice, same-device multiplayer, and wireless online multiplayer.
+[English](./README.md) | [中文](./README.zh-CN.md)
+
+Air Hockey Online is a browser-based arcade air hockey game built for fast, competitive play across phones, tablets, and desktop browsers. It supports local play, wireless LAN play, and full online multiplayer with server-authoritative physics.
 
 Play now:
 
 https://air-hockey-online-kaleido1.onrender.com/
 
-> Render free services may take a short moment to wake up after inactivity.
+## Multi-Device Support
+
+- Mobile, tablet, and desktop browser support with touch-first controls.
+- Responsive canvas rendering tuned for different refresh rates and screen densities.
+- Same ruleset and synchronized game flow across local, LAN, and online sessions.
+- Chinese and English UI with built-in language switching.
+
+## Multiplayer
+
+### Wireless Two Players
+
+Wireless mode is designed for players on the same local network. Two nearby devices can join quickly and start a match without sharing a public room link.
+
+### Online Two Players
+
+Online mode supports remote play through room creation and room join flows. Players can create a room, share the room code, reconnect, leave, and return to the same session flow with server-authoritative state sync.
 
 ## Features
 
-- Single-player mode with rhythm-based AI behavior.
-- Same-device two-player mode with multi-touch support.
-- Wireless two-player mode powered by WebSocket room sync.
+- Single-player mode with an upgraded AI opponent that can defend, change tempo, and attack different lanes.
+- Same-device two-player mode with multi-touch control support.
+- Wireless two-player mode for devices on the same network.
+- Online two-player matchmaking with room codes and synchronized multiplayer state.
 - One-puck and two-puck match options.
-- First-to-7 scoring with animated goal, win, and loss states.
-- Touch-friendly controls, keyboard pause support, and smooth canvas rendering.
-- Chinese and English interface with automatic language detection.
+- Server-authoritative puck, mallet, scoring, and match-state logic.
+- Fast collision response tuned for competitive play.
+- First-to-7 scoring with pause, goal, and game-over states.
+- Touch-friendly gameplay with browser-based instant play.
 
 ## Technology
 
 - Node.js HTTP server with a lightweight WebSocket implementation.
-- Canvas-based rendering for the game table, mallets, pucks, menus, and overlays.
-- Server-authoritative game physics for synchronized multiplayer state.
-- Render deployment via `render.yaml`.
-
-## Deployment
-
-The production build runs as a Render Web Service:
-
-- Build command: `npm install`
-- Start command: `npm start`
-- Runtime: Node.js
-- Required host binding: `HOST=0.0.0.0`
-
-The live URL is:
-
-https://air-hockey-online-kaleido1.onrender.com/
+- Canvas rendering for the rink, puck, mallets, overlays, and menus.
+- Server-authoritative physics and multiplayer synchronization.
+- Bilingual interface and browser-based multiplayer session management.
