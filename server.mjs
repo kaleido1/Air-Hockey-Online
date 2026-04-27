@@ -20,8 +20,8 @@ const TABLE = {
   firstTo: 7
 };
 
-const PHYSICS_HZ = 120;
-const SNAPSHOT_HZ = 60;
+const PHYSICS_HZ = 180;
+const SNAPSHOT_HZ = 90;
 const DT = 1 / PHYSICS_HZ;
 const MALLET_MAX_SPEED = 5200;
 const HUMAN_MALLET_MAX_SPEED = 6800;
@@ -41,8 +41,7 @@ const STATIC_PUCK_SPEED = 70;
 const STATIC_STRIKE_MIN_SPEED = 520;
 const STATIC_SWEEP_MIN_SPEED = 460;
 const EDGE_BLOCK_RESPONSE_SPEED = 48;
-const MAX_INPUT_REWIND_MS = 30;
-const PUCK_SUBSTEPS = 16;
+const PUCK_SUBSTEPS = 18;
 const FRICTION_PER_SECOND = 0.991;
 const STUCK_SPEED = 95;
 const STUCK_SECONDS = 0.38;
@@ -129,7 +128,6 @@ server.on("upgrade", (req, socket) => {
     networkKey: getClientNetworkKey(req),
     queued: false,
     lastPongAt: Date.now(),
-    estimatedLatencyMs: 0,
     displayRefreshHz: SNAPSHOT_HZ,
     snapshotIntervalMs: 1000 / SNAPSHOT_HZ,
     lastSnapshotAt: 0
@@ -691,16 +689,9 @@ function updateInput(client, message) {
   mallet.vy = (dy / inputDt) * velocityScale;
   mallet.lastInputAt = now;
   mallet.directInputUntil = now + 90;
-  client.estimatedLatencyMs = clamp(Number(message.latencyMs) || client.estimatedLatencyMs || 0, 0, 120);
 
   if (room.state.phase === "playing") {
-    resolveInputHits(
-      room,
-      mallet,
-      playerIndex,
-      inputDt,
-      clamp(client.estimatedLatencyMs / 2000, 0, MAX_INPUT_REWIND_MS / 1000)
-    );
+    resolveInputHits(room, mallet, playerIndex, inputDt);
   }
 
   room.updatedAt = now;
@@ -778,16 +769,12 @@ function moveMallets(state, dt) {
   }
 }
 
-function resolveInputHits(room, mallet, malletIndex, dt, rewindSec = 0) {
+function resolveInputHits(room, mallet, malletIndex, dt) {
+  let anyHit = false;
   for (const puck of room.state.pucks) {
-    let hit = collidePuckWithMallet(room, puck, mallet, malletIndex, dt);
-    if (!hit && rewindSec > 0.0005) {
-      hit = collidePuckWithMallet(room, puck, mallet, malletIndex, dt, {
-        rewindSec,
-        sweepDtOverride: dt + rewindSec
-      });
-    }
+    const hit = collidePuckWithMallet(room, puck, mallet, malletIndex, dt);
     if (!hit) continue;
+    anyHit = true;
     for (const currentMallet of room.state.mallets) {
       forceSeparatePuckFromMallet(room, puck, currentMallet);
     }
@@ -795,6 +782,7 @@ function resolveInputHits(room, mallet, malletIndex, dt, rewindSec = 0) {
     capPuckSpeed(puck);
     emitFx(room, "hit", false, hit);
   }
+  if (anyHit) sendRoomState(room, Date.now(), true);
 }
 
 function stepPucks(room, dt) {
@@ -948,33 +936,18 @@ function forceSeparatePuckFromMallet(room, puck, mallet) {
   }
 }
 
-function collidePuckWithMallet(room, puck, mallet, malletIndex, dt, options = null) {
+function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   const minDistance = TABLE.puckRadius + TABLE.malletRadius;
   const collisionDistance = minDistance + CONTACT_SLOP;
   const now = Date.now();
-  const rewindSec = clamp(options?.rewindSec || 0, 0, MAX_INPUT_REWIND_MS / 1000);
   const startX = Number.isFinite(mallet.sweepFromX) ? mallet.sweepFromX : mallet.x;
   const startY = Number.isFinite(mallet.sweepFromY) ? mallet.sweepFromY : mallet.y;
-  const puckStartX =
-    Number.isFinite(options?.puckStartX)
-      ? options.puckStartX
-      : rewindSec > 0
-        ? puck.x - puck.vx * rewindSec
-        : Number.isFinite(puck.prevX)
-          ? puck.prevX
-          : puck.x;
-  const puckStartY =
-    Number.isFinite(options?.puckStartY)
-      ? options.puckStartY
-      : rewindSec > 0
-        ? puck.y - puck.vy * rewindSec
-        : Number.isFinite(puck.prevY)
-          ? puck.prevY
-          : puck.y;
+  const puckStartX = Number.isFinite(puck.prevX) ? puck.prevX : puck.x;
+  const puckStartY = Number.isFinite(puck.prevY) ? puck.prevY : puck.y;
   const sweepX = mallet.x - startX;
   const sweepY = mallet.y - startY;
   const sweepElapsed = mallet.sweepStartedAt ? (now - mallet.sweepStartedAt) / 1000 : dt;
-  const sweepDt = clamp(options?.sweepDtOverride || sweepElapsed, 1 / 240, 1 / 12);
+  const sweepDt = clamp(sweepElapsed, 1 / 240, 1 / 12);
   const pathVx = sweepX / sweepDt;
   const pathVy = sweepY / sweepDt;
   const strikeVx = Number.isFinite(pathVx) && Math.hypot(sweepX, sweepY) > 0.001 ? pathVx : mallet.vx;
@@ -1011,12 +984,9 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt, options = nu
         const root = Math.sqrt(discriminant);
         const t0 = (-b - root) / (2 * a);
         const t1 = (-b + root) / (2 * a);
-        if (t0 >= -0.03 && t0 <= 1) {
+        if (t0 >= 0 && t0 <= 1) {
           hit = true;
-          hitT = clamp(t0, 0, 1);
-        } else if (t1 >= 0 && t1 <= 1 && relativeStartDistance <= collisionDistance + 1.5) {
-          hit = true;
-          hitT = 0;
+          hitT = t0;
         }
       }
     }
@@ -1609,24 +1579,28 @@ function centerMallets(state) {
 function sendSnapshots() {
   const now = Date.now();
   for (const room of rooms.values()) {
-    const message = {
-      type: "state",
-      now,
-      code: room.code,
-      players: publicPlayers(room),
-      settings: room.settings,
-      state: publicState(room.state)
-    };
-    const sent = new Set();
-    for (const player of room.players) {
-      if (!player || player.bot) continue;
-      const client = clients.get(player.id);
-      if (!client || sent.has(client.id)) continue;
-      if (now - client.lastSnapshotAt < client.snapshotIntervalMs - 1) continue;
-      sent.add(client.id);
-      client.lastSnapshotAt = now;
-      send(client, message);
-    }
+    sendRoomState(room, now, false);
+  }
+}
+
+function sendRoomState(room, now = Date.now(), force = false) {
+  const message = {
+    type: "state",
+    now,
+    code: room.code,
+    players: publicPlayers(room),
+    settings: room.settings,
+    state: publicState(room.state)
+  };
+  const sent = new Set();
+  for (const player of room.players) {
+    if (!player || player.bot) continue;
+    const client = clients.get(player.id);
+    if (!client || sent.has(client.id)) continue;
+    if (!force && now - client.lastSnapshotAt < client.snapshotIntervalMs - 1) continue;
+    sent.add(client.id);
+    client.lastSnapshotAt = now;
+    send(client, message);
   }
 }
 
