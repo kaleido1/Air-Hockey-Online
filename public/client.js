@@ -203,6 +203,8 @@ let serverState = null;
 let previousState = null;
 let lastStateReceivedAt = 0;
 let measuredRttMs = 24;
+let serverClockOffsetMs = 0;
+const stateSnapshots = [];
 let roomPlayers = null;
 let pendingRoomFromUrl = new URLSearchParams(location.search).get("room") || "";
 let pointerDown = false;
@@ -240,7 +242,7 @@ let currentCursor = "";
 const predictedMallets = new Map();
 const LOCAL_PREDICTION_WINDOW_MS = 90;
 const LOCAL_CONTACT_SEPARATION = 0.75;
-const ENABLE_LOCAL_PUCK_PREDICTION = true;
+const ENABLE_LOCAL_PUCK_PREDICTION = false;
 
 applyLanguage();
 connect();
@@ -437,6 +439,7 @@ function handleMessage(message) {
       previousState = serverState;
       serverState = message.state;
       lastStateReceivedAt = performance.now();
+      rememberStateSnapshot(message);
       roomSettings = message.settings || roomSettings;
       if (serverState.phase !== lastPhase) {
         lastPhase = serverState.phase;
@@ -677,6 +680,8 @@ function clearRoom() {
   serverState = null;
   previousState = null;
   lastStateReceivedAt = 0;
+  serverClockOffsetMs = 0;
+  stateSnapshots.length = 0;
   roomPlayers = null;
   predictedMallets.clear();
   trails.clear();
@@ -737,7 +742,7 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
 
   for (const puck of serverState.pucks) {
     if (puck.localPredictedAt && now - puck.localPredictedAt < 22) continue;
-    const visualPuck = displayPuck(puck);
+    const visualPuck = puck;
     const finalDistance = Math.hypot(visualPuck.x - toX, visualPuck.y - toY);
     const relativeStartX = visualPuck.x - fromX;
     const relativeStartY = visualPuck.y - fromY;
@@ -1095,6 +1100,80 @@ function resizeCanvas() {
   requestAnimationFrame(measureCanvas);
 }
 
+function rememberStateSnapshot(message) {
+  const receivedAt = performance.now();
+  const serverTime = Number(message.now) || Date.now();
+  const offset = serverTime - receivedAt;
+  serverClockOffsetMs = serverClockOffsetMs ? serverClockOffsetMs * 0.9 + offset * 0.1 : offset;
+
+  stateSnapshots.push({
+    serverTime,
+    state: message.state
+  });
+
+  const cutoff = serverTime - 500;
+  while (stateSnapshots.length > 2 && stateSnapshots[0].serverTime < cutoff) {
+    stateSnapshots.shift();
+  }
+  while (stateSnapshots.length > 12) stateSnapshots.shift();
+}
+
+function renderState() {
+  if (!serverState) return null;
+  if (serverState.phase !== "playing" || stateSnapshots.length < 2) return serverState;
+
+  const interpolationDelayMs = Math.max(50, Math.min(82, 46 + measuredRttMs * 0.25));
+  const targetServerTime = performance.now() + serverClockOffsetMs - interpolationDelayMs;
+  let previous = null;
+  let next = null;
+
+  for (const snapshot of stateSnapshots) {
+    if (snapshot.serverTime <= targetServerTime) previous = snapshot;
+    if (snapshot.serverTime >= targetServerTime) {
+      next = snapshot;
+      break;
+    }
+  }
+
+  if (!previous) return stateSnapshots[0]?.state || serverState;
+  if (!next) return previous.state;
+  if (previous === next || next.serverTime <= previous.serverTime) return next.state;
+  if (previous.state.phase !== next.state.phase) return next.state;
+
+  const alpha = clamp(
+    (targetServerTime - previous.serverTime) / (next.serverTime - previous.serverTime),
+    0,
+    1
+  );
+  return interpolateState(previous.state, next.state, alpha);
+}
+
+function interpolateState(fromState, toState, alpha) {
+  return {
+    ...toState,
+    mallets: toState.mallets.map((mallet, index) => {
+      const from = fromState.mallets[index];
+      if (!from) return mallet;
+      return interpolateBody(from, mallet, alpha);
+    }),
+    pucks: toState.pucks.map((puck) => {
+      const from = fromState.pucks.find((candidate) => candidate.id === puck.id);
+      if (!from) return puck;
+      return interpolateBody(from, puck, alpha);
+    })
+  };
+}
+
+function interpolateBody(from, to, alpha) {
+  return {
+    ...to,
+    x: lerp(from.x, to.x, alpha),
+    y: lerp(from.y, to.y, alpha),
+    vx: lerp(from.vx || 0, to.vx || 0, alpha),
+    vy: lerp(from.vy || 0, to.vy || 0, alpha)
+  };
+}
+
 function render(frameTime = performance.now()) {
   requestAnimationFrame(render);
   const targetFrameMs = 1000 / 60;
@@ -1109,7 +1188,7 @@ function render(frameTime = performance.now()) {
     renderBudgetMs %= targetFrameMs;
   }
 
-  const state = serverState || demoState();
+  const state = renderState() || demoState();
   const nextCursor = isActivePlay() ? "none" : "default";
   if (currentCursor !== nextCursor) {
     currentCursor = nextCursor;
@@ -2073,7 +2152,7 @@ function drawGoalSlot(y, outer) {
 function drawState(state) {
   ctx.save();
   for (let index = 0; index < (state.pucks || []).length; index += 1) {
-    drawPuck(displayPuck(state.pucks[index]), index);
+    drawPuck(state.pucks[index], index);
   }
 
   for (let index = 0; index < state.mallets.length; index += 1) {
@@ -2081,54 +2160,6 @@ function drawState(state) {
   }
 
   ctx.restore();
-}
-
-function displayPuck(puck) {
-  if (!serverState || serverState.phase !== "playing") return puck;
-  const snapshotAgeMs = Math.max(0, performance.now() - lastStateReceivedAt);
-  const networkLeadMs = Math.min(36, measuredRttMs * 0.45);
-  const projectionMs = Math.min(58, snapshotAgeMs + networkLeadMs + 6);
-  if (projectionMs < 1) return puck;
-  return projectPuck(puck, projectionMs / 1000);
-}
-
-function projectPuck(puck, seconds) {
-  let x = puck.x;
-  let y = puck.y;
-  let vx = puck.vx || 0;
-  let vy = puck.vy || 0;
-  const speed = Math.hypot(vx, vy);
-  if (speed < 1) return puck;
-
-  const r = TABLE.puckRadius;
-  const goalLeft = TABLE.width / 2 - TABLE.goalWidth / 2;
-  const goalRight = TABLE.width / 2 + TABLE.goalWidth / 2;
-  const steps = Math.max(1, Math.ceil(seconds / 0.012));
-  const dt = seconds / steps;
-
-  for (let step = 0; step < steps; step += 1) {
-    x += vx * dt;
-    y += vy * dt;
-
-    if (x < r) {
-      x = r;
-      vx = Math.abs(vx) * 0.94;
-    } else if (x > TABLE.width - r) {
-      x = TABLE.width - r;
-      vx = -Math.abs(vx) * 0.94;
-    }
-
-    const insideGoal = x > goalLeft && x < goalRight;
-    if (y < r && !insideGoal) {
-      y = r;
-      vy = Math.abs(vy) * 0.94;
-    } else if (y > TABLE.height - r && !insideGoal) {
-      y = TABLE.height - r;
-      vy = -Math.abs(vy) * 0.94;
-    }
-  }
-
-  return { ...puck, x, y, vx, vy };
 }
 
 function displayMallet(mallet, index) {
@@ -2514,4 +2545,8 @@ function makeNoiseBuffer(duration) {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function lerp(from, to, alpha) {
+  return from + (to - from) * alpha;
 }
