@@ -763,7 +763,13 @@ function sendPointer(event, force, overridePlayerIndex = null) {
   if (ENABLE_LOCAL_PUCK_PREDICTION) {
     applyLocalStrikePrediction(targetIndex, fromX, fromY, constrained.x, constrained.y, now);
   }
-  send({ type: "input", x: constrained.x, y: constrained.y, playerIndex: targetIndex });
+  send({
+    type: "input",
+    x: constrained.x,
+    y: constrained.y,
+    playerIndex: targetIndex,
+    latencyMs: Math.round(measuredRttMs)
+  });
 }
 
 function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {

@@ -41,6 +41,7 @@ const STATIC_PUCK_SPEED = 70;
 const STATIC_STRIKE_MIN_SPEED = 520;
 const STATIC_SWEEP_MIN_SPEED = 460;
 const EDGE_BLOCK_RESPONSE_SPEED = 48;
+const MAX_INPUT_REWIND_MS = 30;
 const PUCK_SUBSTEPS = 16;
 const FRICTION_PER_SECOND = 0.991;
 const STUCK_SPEED = 95;
@@ -128,6 +129,7 @@ server.on("upgrade", (req, socket) => {
     networkKey: getClientNetworkKey(req),
     queued: false,
     lastPongAt: Date.now(),
+    estimatedLatencyMs: 0,
     displayRefreshHz: SNAPSHOT_HZ,
     snapshotIntervalMs: 1000 / SNAPSHOT_HZ,
     lastSnapshotAt: 0
@@ -689,9 +691,16 @@ function updateInput(client, message) {
   mallet.vy = (dy / inputDt) * velocityScale;
   mallet.lastInputAt = now;
   mallet.directInputUntil = now + 90;
+  client.estimatedLatencyMs = clamp(Number(message.latencyMs) || client.estimatedLatencyMs || 0, 0, 120);
 
   if (room.state.phase === "playing") {
-    resolveInputHits(room, mallet, playerIndex, inputDt);
+    resolveInputHits(
+      room,
+      mallet,
+      playerIndex,
+      inputDt,
+      clamp(client.estimatedLatencyMs / 2000, 0, MAX_INPUT_REWIND_MS / 1000)
+    );
   }
 
   room.updatedAt = now;
@@ -769,9 +778,15 @@ function moveMallets(state, dt) {
   }
 }
 
-function resolveInputHits(room, mallet, malletIndex, dt) {
+function resolveInputHits(room, mallet, malletIndex, dt, rewindSec = 0) {
   for (const puck of room.state.pucks) {
-    const hit = collidePuckWithMallet(room, puck, mallet, malletIndex, dt);
+    let hit = collidePuckWithMallet(room, puck, mallet, malletIndex, dt);
+    if (!hit && rewindSec > 0.0005) {
+      hit = collidePuckWithMallet(room, puck, mallet, malletIndex, dt, {
+        rewindSec,
+        sweepDtOverride: dt + rewindSec
+      });
+    }
     if (!hit) continue;
     for (const currentMallet of room.state.mallets) {
       forceSeparatePuckFromMallet(room, puck, currentMallet);
@@ -933,18 +948,33 @@ function forceSeparatePuckFromMallet(room, puck, mallet) {
   }
 }
 
-function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
+function collidePuckWithMallet(room, puck, mallet, malletIndex, dt, options = null) {
   const minDistance = TABLE.puckRadius + TABLE.malletRadius;
   const collisionDistance = minDistance + CONTACT_SLOP;
   const now = Date.now();
+  const rewindSec = clamp(options?.rewindSec || 0, 0, MAX_INPUT_REWIND_MS / 1000);
   const startX = Number.isFinite(mallet.sweepFromX) ? mallet.sweepFromX : mallet.x;
   const startY = Number.isFinite(mallet.sweepFromY) ? mallet.sweepFromY : mallet.y;
-  const puckStartX = Number.isFinite(puck.prevX) ? puck.prevX : puck.x;
-  const puckStartY = Number.isFinite(puck.prevY) ? puck.prevY : puck.y;
+  const puckStartX =
+    Number.isFinite(options?.puckStartX)
+      ? options.puckStartX
+      : rewindSec > 0
+        ? puck.x - puck.vx * rewindSec
+        : Number.isFinite(puck.prevX)
+          ? puck.prevX
+          : puck.x;
+  const puckStartY =
+    Number.isFinite(options?.puckStartY)
+      ? options.puckStartY
+      : rewindSec > 0
+        ? puck.y - puck.vy * rewindSec
+        : Number.isFinite(puck.prevY)
+          ? puck.prevY
+          : puck.y;
   const sweepX = mallet.x - startX;
   const sweepY = mallet.y - startY;
   const sweepElapsed = mallet.sweepStartedAt ? (now - mallet.sweepStartedAt) / 1000 : dt;
-  const sweepDt = clamp(sweepElapsed, dt, 1 / 24);
+  const sweepDt = clamp(options?.sweepDtOverride || sweepElapsed, 1 / 240, 1 / 12);
   const pathVx = sweepX / sweepDt;
   const pathVy = sweepY / sweepDt;
   const strikeVx = Number.isFinite(pathVx) && Math.hypot(sweepX, sweepY) > 0.001 ? pathVx : mallet.vx;
@@ -981,9 +1011,12 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
         const root = Math.sqrt(discriminant);
         const t0 = (-b - root) / (2 * a);
         const t1 = (-b + root) / (2 * a);
-        if (t0 >= 0 && t0 <= 1) {
+        if (t0 >= -0.03 && t0 <= 1) {
           hit = true;
-          hitT = t0;
+          hitT = clamp(t0, 0, 1);
+        } else if (t1 >= 0 && t1 <= 1 && relativeStartDistance <= collisionDistance + 1.5) {
+          hit = true;
+          hitT = 0;
         }
       }
     }
