@@ -229,9 +229,10 @@ let gameoverReturnTimer = 0;
 const activePointers = new Map();
 const touchCapable = navigator.maxTouchPoints > 0 || "ontouchstart" in window;
 let lastCenterTapAt = 0;
+let displayRefreshHz = 60;
+let hasReportedRefreshHz = false;
+let refreshSampleFrames = [];
 let renderScale = 1;
-let lastRenderFrameAt = 0;
-let renderBudgetMs = 1000 / 60;
 let tableCache = null;
 let malletSprite = null;
 let puckSprite = null;
@@ -243,11 +244,15 @@ const LOCAL_CONTACT_SEPARATION = 0.75;
 const ENABLE_LOCAL_PUCK_PREDICTION = false;
 
 applyLanguage();
+startRefreshRateSampling();
 connect();
 resizeCanvas();
 requestAnimationFrame(render);
 
 window.addEventListener("resize", resizeCanvas);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") startRefreshRateSampling();
+});
 window.addEventListener("pointerdown", unlockAudio, { capture: true, passive: true });
 window.addEventListener("touchstart", unlockAudio, { capture: true, passive: true });
 window.addEventListener("mousedown", unlockAudio, { capture: true, passive: true });
@@ -370,6 +375,7 @@ function connect() {
       send({ type: "join", code: roomCode, preferredIndex: playerIndex });
       setStatus("rejoining");
     }
+    reportRefreshRate();
     heartbeat();
   });
 
@@ -505,6 +511,41 @@ function heartbeat() {
   }
   clearTimeout(heartbeatTimer);
   heartbeatTimer = setTimeout(heartbeat, 700);
+}
+
+function startRefreshRateSampling() {
+  refreshSampleFrames = [];
+  let previousFrameAt = 0;
+
+  function sample(frameAt) {
+    if (document.visibilityState === "hidden") return;
+    if (previousFrameAt) {
+      const delta = frameAt - previousFrameAt;
+      if (delta > 3 && delta < 40) refreshSampleFrames.push(delta);
+    }
+    previousFrameAt = frameAt;
+    if (refreshSampleFrames.length < 24) {
+      requestAnimationFrame(sample);
+      return;
+    }
+
+    refreshSampleFrames.sort((a, b) => a - b);
+    const median = refreshSampleFrames[Math.floor(refreshSampleFrames.length / 2)] || 1000 / 60;
+    const measuredHz = clamp(Math.round(1000 / median), 60, 144);
+    if (Math.abs(measuredHz - displayRefreshHz) >= 3) {
+      displayRefreshHz = measuredHz;
+      hasReportedRefreshHz = false;
+      reportRefreshRate();
+    }
+  }
+
+  requestAnimationFrame(sample);
+}
+
+function reportRefreshRate() {
+  if (!connected || hasReportedRefreshHz) return;
+  hasReportedRefreshHz = true;
+  send({ type: "display", refreshHz: displayRefreshHz });
 }
 
 function getInitialLanguage() {
@@ -700,7 +741,8 @@ function sendPointer(event, force, overridePlayerIndex = null) {
   const point = eventToTable(event);
   if (!point) return;
   const targetIndex = overridePlayerIndex === 0 || overridePlayerIndex === 1 ? overridePlayerIndex : playerIndex;
-  if (!force && now - lastInputAtByPlayer[targetIndex] < 1000 / 120) return;
+  const inputIntervalMs = 1000 / clamp(displayRefreshHz * 1.15, 120, 240);
+  if (!force && now - lastInputAtByPlayer[targetIndex] < inputIntervalMs) return;
   lastInputAtByPlayer[targetIndex] = now;
   let constrained = constrainForPlayer(targetIndex, point.x, point.y);
   if (serverState?.phase !== "playing") {
@@ -1149,18 +1191,6 @@ function interpolateBody(from, to, alpha) {
 
 function render(frameTime = performance.now()) {
   requestAnimationFrame(render);
-  const targetFrameMs = 1000 / 60;
-  if (!lastRenderFrameAt) {
-    lastRenderFrameAt = frameTime;
-    renderBudgetMs = 0;
-  } else {
-    const elapsed = Math.min(100, Math.max(0, frameTime - lastRenderFrameAt));
-    lastRenderFrameAt = frameTime;
-    renderBudgetMs += elapsed;
-    if (renderBudgetMs < targetFrameMs) return;
-    renderBudgetMs %= targetFrameMs;
-  }
-
   const state = renderState() || demoState();
   const nextCursor = isActivePlay() ? "none" : "default";
   if (currentCursor !== nextCursor) {

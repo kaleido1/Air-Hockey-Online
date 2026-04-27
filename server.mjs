@@ -126,7 +126,10 @@ server.on("upgrade", (req, socket) => {
     playerIndex: null,
     networkKey: getClientNetworkKey(req),
     queued: false,
-    lastPongAt: Date.now()
+    lastPongAt: Date.now(),
+    displayRefreshHz: SNAPSHOT_HZ,
+    snapshotIntervalMs: 1000 / SNAPSHOT_HZ,
+    lastSnapshotAt: 0
   };
 
   socket.setNoDelay(true);
@@ -265,9 +268,18 @@ function handleMessage(client, message) {
     case "ping":
       send(client, { type: "pong", at: message.at || Date.now() });
       break;
+    case "display":
+      updateClientDisplay(client, message);
+      break;
     default:
       send(client, { type: "error", message: "Unknown message" });
   }
+}
+
+function updateClientDisplay(client, message) {
+  const refreshHz = clamp(Math.round(Number(message.refreshHz) || SNAPSHOT_HZ), 60, PHYSICS_HZ);
+  client.displayRefreshHz = refreshHz;
+  client.snapshotIntervalMs = 1000 / refreshHz;
 }
 
 function quickMatch(client, puckCount) {
@@ -659,7 +671,7 @@ function updateInput(client, message) {
   const dx = constrained.x - previousX;
   const dy = constrained.y - previousY;
   const elapsed = mallet.lastInputAt ? (now - mallet.lastInputAt) / 1000 : 1 / PHYSICS_HZ;
-  const inputDt = clamp(elapsed, 1 / 140, 1 / 30);
+  const inputDt = clamp(elapsed, 1 / 240, 1 / 24);
   const speed = Math.hypot(dx, dy) / inputDt;
   const velocityScale = speed > HUMAN_MALLET_MAX_SPEED ? HUMAN_MALLET_MAX_SPEED / speed : 1;
   if (!mallet.hasPendingSweep) {
@@ -1495,16 +1507,24 @@ function centerMallets(state) {
 function sendSnapshots() {
   const now = Date.now();
   for (const room of rooms.values()) {
-    if (now - room.lastSnapshotAt < 1000 / SNAPSHOT_HZ - 1) continue;
-    room.lastSnapshotAt = now;
-    broadcastRoom(room, {
+    const message = {
       type: "state",
       now,
       code: room.code,
       players: publicPlayers(room),
       settings: room.settings,
       state: publicState(room.state)
-    });
+    };
+    const sent = new Set();
+    for (const player of room.players) {
+      if (!player || player.bot) continue;
+      const client = clients.get(player.id);
+      if (!client || sent.has(client.id)) continue;
+      if (now - client.lastSnapshotAt < client.snapshotIntervalMs - 1) continue;
+      sent.add(client.id);
+      client.lastSnapshotAt = now;
+      send(client, message);
+    }
   }
 }
 
