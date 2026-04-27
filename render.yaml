@@ -8,3 +8,5 @@ services:
     envVars:
       - key: NODE_VERSION
         value: 22
+      - key: HOST
+        value: 0.0.0.0

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
 
-const HOST = process.env.HOSTNAME || "127.0.0.1";
+const HOST = process.env.HOST || process.env.HOSTNAME || "127.0.0.1";
 const PORT = Number(process.env.PORT || 3100);
 
 const TABLE = {
