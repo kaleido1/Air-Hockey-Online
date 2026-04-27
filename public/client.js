@@ -305,7 +305,9 @@ els.leaveButton.addEventListener("click", () => {
 
 canvas.addEventListener("pointerdown", (event) => {
   pointerDown = true;
-  canvas.setPointerCapture(event.pointerId);
+  if (!(isLocalGame() && event.pointerType !== "touch")) {
+    canvas.setPointerCapture(event.pointerId);
+  }
   measureCanvas();
   unlockAudio();
   const point = eventToCanvas(event);
@@ -329,7 +331,7 @@ canvas.addEventListener("pointerdown", (event) => {
   }
   if (isLocalGame() && point) {
     const localIndex = event.pointerType === "touch" ? (point.y < TABLE.height / 2 ? 1 : 0) : localPointerMalletIndex;
-    activePointers.set(event.pointerId, localIndex);
+    if (event.pointerType === "touch") activePointers.set(event.pointerId, localIndex);
     sendPointer(event, true, localIndex);
   } else {
     sendPointer(event, true);
@@ -339,8 +341,12 @@ canvas.addEventListener("pointerdown", (event) => {
 canvas.addEventListener("pointermove", (event) => {
   if (!isActivePlay()) return;
   if (isLocalGame()) {
-    const localIndex = activePointers.get(event.pointerId);
-    if (localIndex === 0 || localIndex === 1) sendPointer(event, false, localIndex);
+    if (event.pointerType === "touch") {
+      const localIndex = activePointers.get(event.pointerId);
+      if (localIndex === 0 || localIndex === 1) sendPointer(event, false, localIndex);
+    } else {
+      sendPointer(event, false, localPointerMalletIndex);
+    }
   } else {
     sendPointer(event, false);
   }
@@ -349,8 +355,12 @@ canvas.addEventListener("pointermove", (event) => {
 canvas.addEventListener("pointerup", (event) => {
   pointerDown = false;
   if (isActivePlay()) {
-    const localIndex = activePointers.get(event.pointerId);
-    sendPointer(event, true, localIndex);
+    if (isLocalGame() && event.pointerType !== "touch") {
+      sendPointer(event, true, localPointerMalletIndex);
+    } else {
+      const localIndex = activePointers.get(event.pointerId);
+      sendPointer(event, true, localIndex);
+    }
   }
   activePointers.delete(event.pointerId);
 });

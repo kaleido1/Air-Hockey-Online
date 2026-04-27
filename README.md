@@ -14,7 +14,7 @@ https://air-hockey-online-kaleido1.onrender.com/
 >
 > - Double tap the center area on touch devices to pause or resume.
 > - Press `Space` on desktop to pause or resume.
-> - In same-device two-player mode, touchpads and mouse-like single-pointer devices control the bottom mallet by default.
+> - In same-device two-player mode, touchpads and mouse-like single-pointer devices control the bottom mallet by default without needing to click or press down.
 > - In same-device two-player mode, press `C` to switch control between the bottom and top mallet.
 > - Wireless and online multiplayer modes do not support mallet switching with `C`.
 
