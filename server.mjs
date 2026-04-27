@@ -1249,28 +1249,29 @@ function awardScoredPucks(room, scorers) {
 function updateBot(room) {
   const now = Date.now();
   const mallet = room.state.mallets[1];
+  const opponent = room.state.mallets[0];
   const brain = updateBotBrain(room, now);
   const defensiveX = TABLE.width / 2;
   const defensiveY = TABLE.height * 0.18;
   const goalLeft = TABLE.width / 2 - TABLE.goalWidth / 2 + TABLE.malletRadius * 0.32;
   const goalRight = TABLE.width / 2 + TABLE.goalWidth / 2 - TABLE.malletRadius * 0.32;
   let target = { x: defensiveX, y: defensiveY };
-  let speed = brain.mode === "ambush" ? BOT_MAX_SPEED : brain.mode === "bait" ? 2450 : 3400;
+  let speed = brain.mode === "ambush" ? BOT_MAX_SPEED : brain.mode === "bait" ? 2550 : 3550;
 
   const servePuck = room.state.pucks.find(
     (puck) => puck.y < TABLE.height / 2 && Math.hypot(puck.vx, puck.vy) < 8
   );
   if (servePuck) {
-    const windup = Math.sin(now / 180) * (brain.mode === "ambush" ? 42 : 18);
-    const fakePause = brain.mode === "bait" && now < brain.nextDecisionAt - 260;
-    mallet.maxSpeed = fakePause ? 1700 : brain.mode === "ambush" ? BOT_MAX_SPEED : 3600;
+    const windup = Math.sin(now / 180) * (brain.mode === "ambush" ? 42 : 20);
+    const fakePause = brain.mode === "bait" && now < brain.nextDecisionAt - 220;
+    mallet.maxSpeed = fakePause ? 1850 : brain.mode === "ambush" ? BOT_MAX_SPEED : 3800;
     mallet.targetX = clamp(
-      servePuck.x + windup + (brain.mode === "ambush" ? brain.side * 22 : 0),
+      servePuck.x + windup + brain.side * (brain.mode === "ambush" ? 26 : 12),
       TABLE.malletRadius,
       TABLE.width - TABLE.malletRadius
     );
     mallet.targetY = clamp(
-      servePuck.y - (TABLE.malletRadius + TABLE.puckRadius - (brain.mode === "ambush" ? 26 : 12)),
+      servePuck.y - (TABLE.malletRadius + TABLE.puckRadius - (brain.mode === "ambush" ? 30 : 14)),
       TABLE.malletRadius,
       TABLE.height / 2 - TABLE.malletRadius - 8
     );
@@ -1280,15 +1281,19 @@ function updateBot(room) {
   const threats = room.state.pucks
     .filter((puck) => puck.y < TABLE.height * 0.66 || puck.vy < -70)
     .map((puck) => {
+      const timeToGuardLine =
+        puck.vy < -40 ? clamp((puck.y - TABLE.height * 0.18) / -puck.vy, 0, 0.92) : 0.36;
       const timeToGoalLine =
-        puck.vy < -40 ? clamp((puck.y - (TABLE.puckRadius + 18)) / -puck.vy, 0, 0.82) : 0.32;
-      const predictedX = predictPuckXAtY(puck, TABLE.puckRadius + 28);
+        puck.vy < -40 ? clamp((puck.y - (TABLE.puckRadius + 18)) / -puck.vy, 0, 0.92) : 0.36;
+      const predictedGuardX = predictPuckXAtY(puck, TABLE.height * 0.18);
+      const predictedGoalX = predictPuckXAtY(puck, TABLE.puckRadius + 28);
       const danger =
         (puck.vy < -90 ? 3 : 0) +
         (puck.y < TABLE.height * 0.38 ? 2 : 0) +
-        (predictedX > goalLeft - 34 && predictedX < goalRight + 34 ? 3 : 0) +
+        (predictedGoalX > goalLeft - 34 && predictedGoalX < goalRight + 34 ? 3 : 0) +
+        (Math.abs(predictedGoalX - defensiveX) < 86 ? 1.1 : 0) +
         Math.max(0, 1 - timeToGoalLine) * 2;
-      return { puck, predictedX, danger, timeToGoalLine };
+      return { puck, predictedGuardX, predictedGoalX, danger, timeToGuardLine, timeToGoalLine };
     })
     .sort((a, b) => b.danger - a.danger || a.puck.y - b.puck.y);
 
@@ -1296,38 +1301,32 @@ function updateBot(room) {
     const threat = threats[0];
     const puck = threat.puck;
     const puckSpeed = Math.hypot(puck.vx, puck.vy);
-    const mustGuard = threat.danger > 4.2 || puck.y < TABLE.height * 0.32 || puck.vy < -260;
-    const interceptBias = puck.vy < 0 ? clamp(threat.timeToGoalLine * 0.42, 0.07, 0.26) : 0.05;
-    const surpriseLane =
-      brain.mode === "ambush" && !mustGuard ? brain.side * (58 + Math.sin(now / 160) * 16) : 0;
+    const mustGuard =
+      threat.danger > 4.4 || puck.y < TABLE.height * 0.34 || puck.vy < -240 || threat.timeToGoalLine < 0.33;
+    const interceptBias = puck.vy < 0 ? clamp(threat.timeToGuardLine * 0.36, 0.06, 0.24) : 0.04;
+    const surpriseLane = brain.mode === "ambush" && !mustGuard ? brain.side * (52 + Math.sin(now / 160) * 18) : 0;
 
     if (mustGuard) {
-      const guardX = clamp(threat.predictedX + puck.vx * 0.035, goalLeft, goalRight);
+      const guardX = clamp(
+        lerp(threat.predictedGuardX, threat.predictedGoalX, threat.timeToGoalLine < 0.22 ? 0.8 : 0.42) +
+          puck.vx * 0.04,
+        goalLeft,
+        goalRight
+      );
       target = {
         x: guardX,
-        y: clamp(TABLE.height * 0.13 + Math.abs(guardX - defensiveX) * 0.05, TABLE.malletRadius, TABLE.height * 0.24)
-      };
-      speed = clamp(3600 + puckSpeed * 0.72, 3900, BOT_MAX_SPEED);
-    } else {
-      const attackY =
-        brain.mode === "ambush" && puck.y < TABLE.height * 0.5 && puck.vy > -220
-          ? puck.y + 38
-          : puck.y - (brain.mode === "bait" ? 116 : 84);
-
-      target = {
-        x: clamp(
-          puck.x + puck.vx * interceptBias + surpriseLane,
+        y: clamp(
+          TABLE.height * (threat.timeToGoalLine < 0.2 ? 0.11 : 0.145) +
+            Math.abs(guardX - defensiveX) * 0.05,
           TABLE.malletRadius,
-          TABLE.width - TABLE.malletRadius
-        ),
-        y: clamp(attackY, TABLE.malletRadius, TABLE.height / 2 - TABLE.malletRadius - 8)
+          TABLE.height * 0.24
+        )
       };
-      speed =
-        brain.mode === "ambush"
-          ? clamp(3600 + puckSpeed * 0.72, 3900, BOT_MAX_SPEED)
-          : brain.mode === "bait"
-            ? clamp(1900 + puckSpeed * 0.2, BOT_MIN_SPEED, 2750)
-            : clamp(2850 + puckSpeed * 0.42, 3000, 3950);
+      speed = clamp(3900 + puckSpeed * 0.78, 4200, BOT_MAX_SPEED);
+    } else {
+      const attackPlan = chooseBotAttackTarget(puck, opponent, brain, now, interceptBias, surpriseLane);
+      target = attackPlan.target;
+      speed = attackPlan.speedBase + clamp(puckSpeed * attackPlan.speedScale, 0, 1200);
     }
   } else if (brain.mode === "bait") {
     target = {
@@ -1341,8 +1340,10 @@ function updateBot(room) {
     };
   }
 
-  target.x += Math.sin(now / brain.tempo + brain.side) * (brain.mode === "ambush" ? 24 : 10);
-  target.y += Math.cos(now / (brain.tempo * 1.22)) * (brain.mode === "bait" ? 12 : 6);
+  target.x += Math.sin(now / brain.tempo + brain.side) * (brain.mode === "ambush" ? 18 : 8);
+  target.y += Math.cos(now / (brain.tempo * 1.22)) * (brain.mode === "bait" ? 8 : 4);
+  target.x = clamp(target.x, TABLE.malletRadius, TABLE.width - TABLE.malletRadius);
+  target.y = clamp(target.y, TABLE.malletRadius, TABLE.height / 2 - TABLE.malletRadius - 8);
   mallet.maxSpeed = speed;
   mallet.targetX = target.x;
   mallet.targetY = target.y;
@@ -1351,15 +1352,62 @@ function updateBot(room) {
 function updateBotBrain(room, now) {
   if (!room.botBrain || now >= room.botBrain.nextDecisionAt) {
     const roll = Math.random();
-    const mode = roll > 0.68 ? "ambush" : roll > 0.42 ? "bait" : "guard";
+    const mode = roll > 0.64 ? "ambush" : roll > 0.34 ? "bait" : "guard";
     room.botBrain = {
       mode,
       side: Math.random() > 0.5 ? 1 : -1,
-      tempo: 150 + Math.random() * 420,
-      nextDecisionAt: now + (mode === "ambush" ? 360 : 620) + Math.random() * (mode === "ambush" ? 460 : 920)
+      tempo: 140 + Math.random() * 360,
+      nextDecisionAt: now + (mode === "ambush" ? 300 : 520) + Math.random() * (mode === "ambush" ? 360 : 760)
     };
   }
   return room.botBrain;
+}
+
+function chooseBotAttackTarget(puck, opponent, brain, now, interceptBias, surpriseLane) {
+  const opponentBias = opponent.x < TABLE.width / 2 ? 1 : -1;
+  const openSide = clamp(
+    opponent.x + opponentBias * (TABLE.malletRadius * 1.2 + 36),
+    TABLE.malletRadius,
+    TABLE.width - TABLE.malletRadius
+  );
+  const cutbackSide = clamp(
+    opponent.x - opponentBias * (TABLE.malletRadius * 0.95 + 18),
+    TABLE.malletRadius,
+    TABLE.width - TABLE.malletRadius
+  );
+  const laneX =
+    brain.mode === "ambush"
+      ? openSide
+      : brain.mode === "bait"
+        ? cutbackSide
+        : lerp(openSide, puck.x, 0.45);
+  const laneLead = brain.mode === "ambush" ? 0.26 : brain.mode === "bait" ? -0.05 : 0.14;
+  const attackY =
+    brain.mode === "ambush" && puck.vy > -180
+      ? puck.y + 44
+      : puck.y - (brain.mode === "bait" ? 128 : 92);
+
+  return {
+    target: {
+      x: clamp(
+        lerp(puck.x + puck.vx * interceptBias, laneX, 0.42) + surpriseLane + Math.sin(now / 210) * 6,
+        TABLE.malletRadius,
+        TABLE.width - TABLE.malletRadius
+      ),
+      y: clamp(
+        attackY + puck.vy * laneLead,
+        TABLE.malletRadius,
+        TABLE.height / 2 - TABLE.malletRadius - 8
+      )
+    },
+    speedBase:
+      brain.mode === "ambush"
+        ? 4050
+        : brain.mode === "bait"
+          ? 2350
+          : 3200,
+    speedScale: brain.mode === "ambush" ? 0.76 : brain.mode === "bait" ? 0.22 : 0.5
+  };
 }
 
 function predictPuckXAtY(puck, targetY) {
@@ -1739,6 +1787,10 @@ function capPuckSpeed(puck) {
 function clamp(value, min, max) {
   if (!Number.isFinite(value)) return (min + max) / 2;
   return Math.max(min, Math.min(max, value));
+}
+
+function lerp(from, to, alpha) {
+  return from + (to - from) * alpha;
 }
 
 function randomRange(min, max) {
