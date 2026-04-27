@@ -201,6 +201,8 @@ let roomSettings = null;
 let roomMinimized = false;
 let serverState = null;
 let previousState = null;
+let lastStateReceivedAt = 0;
+let measuredRttMs = 24;
 let roomPlayers = null;
 let pendingRoomFromUrl = new URLSearchParams(location.search).get("room") || "";
 let pointerDown = false;
@@ -238,7 +240,7 @@ let currentCursor = "";
 const predictedMallets = new Map();
 const LOCAL_PREDICTION_WINDOW_MS = 90;
 const LOCAL_CONTACT_SEPARATION = 0.75;
-const ENABLE_LOCAL_PUCK_PREDICTION = false;
+const ENABLE_LOCAL_PUCK_PREDICTION = true;
 
 applyLanguage();
 connect();
@@ -434,6 +436,7 @@ function handleMessage(message) {
     case "state":
       previousState = serverState;
       serverState = message.state;
+      lastStateReceivedAt = performance.now();
       roomSettings = message.settings || roomSettings;
       if (serverState.phase !== lastPhase) {
         lastPhase = serverState.phase;
@@ -482,7 +485,9 @@ function handleMessage(message) {
       break;
     case "pong":
       if (message.at) {
-        els.pingStatus.textContent = `${Math.max(1, Date.now() - Number(message.at))} ms`;
+        const rtt = Math.max(1, Date.now() - Number(message.at));
+        measuredRttMs = measuredRttMs * 0.8 + rtt * 0.2;
+        els.pingStatus.textContent = `${rtt} ms`;
       }
       break;
     default:
@@ -671,6 +676,7 @@ function clearRoom() {
   roomMinimized = false;
   serverState = null;
   previousState = null;
+  lastStateReceivedAt = 0;
   roomPlayers = null;
   predictedMallets.clear();
   trails.clear();
@@ -731,10 +737,12 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
 
   for (const puck of serverState.pucks) {
     if (puck.localPredictedAt && now - puck.localPredictedAt < 22) continue;
-    const finalDistance = Math.hypot(puck.x - toX, puck.y - toY);
-    const relativeStartX = puck.x - fromX;
-    const relativeStartY = puck.y - fromY;
+    const visualPuck = displayPuck(puck);
+    const finalDistance = Math.hypot(visualPuck.x - toX, visualPuck.y - toY);
+    const relativeStartX = visualPuck.x - fromX;
+    const relativeStartY = visualPuck.y - fromY;
     const relativeStartDistance = Math.hypot(relativeStartX, relativeStartY);
+    const movingTowardPuck = sweepX * relativeStartX + sweepY * relativeStartY > 0;
     const a = sweepX * sweepX + sweepY * sweepY;
     const b = -2 * (relativeStartX * sweepX + relativeStartY * sweepY);
     const c =
@@ -743,11 +751,9 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
       minDistance * minDistance;
     let hitT = null;
 
-    if (finalDistance <= collisionDistance && malletSpeed > 260) {
-      hitT = 1;
-    } else if (relativeStartDistance <= minDistance) {
+    if (relativeStartDistance <= minDistance && finalDistance <= collisionDistance && malletSpeed > 180) {
       hitT = 0;
-    } else if (a > 0.000001) {
+    } else if (movingTowardPuck && a > 0.000001) {
       const discriminant = b * b - 4 * a * c;
       if (discriminant >= 0) {
         const root = Math.sqrt(discriminant);
@@ -761,8 +767,8 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
     const contactMalletX = fromX + sweepX * hitT;
     const contactMalletY = fromY + sweepY * hitT;
 
-    let normalX = puck.x - contactMalletX;
-    let normalY = puck.y - contactMalletY;
+    let normalX = visualPuck.x - contactMalletX;
+    let normalY = visualPuck.y - contactMalletY;
     let normalLength = Math.hypot(normalX, normalY);
     if (normalLength <= 0.001) {
       normalX = sweepX || 1;
@@ -775,7 +781,7 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
     const moveX = sweepX / moveLength;
     const moveY = sweepY / moveLength;
 
-    const puckSpeed = Math.hypot(puck.vx || 0, puck.vy || 0);
+    const puckSpeed = Math.hypot(visualPuck.vx || 0, visualPuck.vy || 0);
     const staticKick = puckSpeed < 70 && finalDistance <= collisionDistance ? 520 : 0;
     const sweepKick = staticKick > 0 && malletSpeed > 260 ? 460 : 0;
     let exitX = normalX;
@@ -2067,7 +2073,7 @@ function drawGoalSlot(y, outer) {
 function drawState(state) {
   ctx.save();
   for (let index = 0; index < (state.pucks || []).length; index += 1) {
-    drawPuck(state.pucks[index], index);
+    drawPuck(displayPuck(state.pucks[index]), index);
   }
 
   for (let index = 0; index < state.mallets.length; index += 1) {
@@ -2075,6 +2081,54 @@ function drawState(state) {
   }
 
   ctx.restore();
+}
+
+function displayPuck(puck) {
+  if (!serverState || serverState.phase !== "playing") return puck;
+  const snapshotAgeMs = Math.max(0, performance.now() - lastStateReceivedAt);
+  const networkLeadMs = Math.min(36, measuredRttMs * 0.45);
+  const projectionMs = Math.min(58, snapshotAgeMs + networkLeadMs + 6);
+  if (projectionMs < 1) return puck;
+  return projectPuck(puck, projectionMs / 1000);
+}
+
+function projectPuck(puck, seconds) {
+  let x = puck.x;
+  let y = puck.y;
+  let vx = puck.vx || 0;
+  let vy = puck.vy || 0;
+  const speed = Math.hypot(vx, vy);
+  if (speed < 1) return puck;
+
+  const r = TABLE.puckRadius;
+  const goalLeft = TABLE.width / 2 - TABLE.goalWidth / 2;
+  const goalRight = TABLE.width / 2 + TABLE.goalWidth / 2;
+  const steps = Math.max(1, Math.ceil(seconds / 0.012));
+  const dt = seconds / steps;
+
+  for (let step = 0; step < steps; step += 1) {
+    x += vx * dt;
+    y += vy * dt;
+
+    if (x < r) {
+      x = r;
+      vx = Math.abs(vx) * 0.94;
+    } else if (x > TABLE.width - r) {
+      x = TABLE.width - r;
+      vx = -Math.abs(vx) * 0.94;
+    }
+
+    const insideGoal = x > goalLeft && x < goalRight;
+    if (y < r && !insideGoal) {
+      y = r;
+      vy = Math.abs(vy) * 0.94;
+    } else if (y > TABLE.height - r && !insideGoal) {
+      y = TABLE.height - r;
+      vy = -Math.abs(vy) * 0.94;
+    }
+  }
+
+  return { ...puck, x, y, vx, vy };
 }
 
 function displayMallet(mallet, index) {
