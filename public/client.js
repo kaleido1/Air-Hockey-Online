@@ -1529,19 +1529,38 @@ function drawRestartBubble() {
   ctx.fillText(t("resetGame"), TABLE.width / 2, 108);
   ctx.translate(TABLE.width / 2, 182);
   ctx.shadowBlur = 0;
+
+  // Standard circular restart icon (↻)
+  const r = 19;
+  const lw = 5.5;
+  // Gap at top-right (~1 o'clock). Arc covers ~300°.
+  const gapCenter = -Math.PI * 0.33;
+  const halfGap = Math.PI * 0.17;
+  const arcStart = gapCenter + halfGap;
+  const arcEnd = gapCenter - halfGap;
+
   ctx.strokeStyle = "#1a6dff";
-  ctx.lineWidth = 6.5;
+  ctx.lineWidth = lw;
   ctx.lineCap = "round";
-  ctx.lineJoin = "round";
   ctx.beginPath();
-  ctx.arc(0, 0, 18.5, -0.2, Math.PI * 1.58, true);
+  ctx.arc(0, 0, r, arcStart, arcEnd, false);
   ctx.stroke();
+
+  // Arrowhead at arcStart pointing clockwise (into the gap)
+  const tipX = r * Math.cos(arcStart);
+  const tipY = r * Math.sin(arcStart);
+  const tx = -Math.sin(arcStart);
+  const ty = Math.cos(arcStart);
+  const nx = Math.cos(arcStart);
+  const ny = Math.sin(arcStart);
+  const aLen = 11;
+  const aW = 6;
 
   ctx.fillStyle = "#1a6dff";
   ctx.beginPath();
-  ctx.moveTo(16.8, -18.8);
-  ctx.lineTo(32.5, -12.6);
-  ctx.lineTo(20.5, -0.2);
+  ctx.moveTo(tipX + tx * aLen, tipY + ty * aLen);
+  ctx.lineTo(tipX - nx * aW, tipY - ny * aW);
+  ctx.lineTo(tipX + nx * aW, tipY + ny * aW);
   ctx.closePath();
   ctx.fill();
   ctx.restore();

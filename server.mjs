@@ -27,7 +27,7 @@ const MALLET_MAX_SPEED = 5200;
 const HUMAN_MALLET_MAX_SPEED = 6800;
 const BOT_MIN_SPEED = 2100;
 const BOT_MAX_SPEED = 4550;
-const PUCK_MAX_SPEED = 3200;
+const PUCK_MAX_SPEED = 5500;
 const PUCK_MIN_SERVE_SPEED = 520;
 const PUCK_MIN_LIVE_SPEED = 120;
 const WALL_RESTITUTION = 0.92;
@@ -914,18 +914,33 @@ function collidePuckWithMallet(room, puck, mallet) {
   const rvx = puck.vx - mallet.vx;
   const rvy = puck.vy - mallet.vy;
   const relativeNormalSpeed = rvx * nx + rvy * ny;
+  const strikeSpeed = Math.max(0, mallet.vx * nx + mallet.vy * ny);
 
-  // Only resolve if objects are approaching each other
   if (relativeNormalSpeed < 0) {
-    // Treat mallet as infinite mass: puck gets the full impulse
+    // Approaching: apply elastic impulse (mallet = infinite mass)
     const impulse = -(1 + MALLET_RESTITUTION) * relativeNormalSpeed;
     puck.vx += nx * impulse;
     puck.vy += ny * impulse;
+  } else {
+    // Overlapping but not approaching: push puck away to prevent sticking
+    const pushSpeed = Math.max(strikeSpeed * (1 + MALLET_RESTITUTION), 400);
+    const puckNormalSpeed = puck.vx * nx + puck.vy * ny;
+    if (puckNormalSpeed < pushSpeed) {
+      puck.vx += nx * (pushSpeed - puckNormalSpeed);
+      puck.vy += ny * (pushSpeed - puckNormalSpeed);
+    }
   }
 
-  const strikeSpeed = Math.max(0, mallet.vx * nx + mallet.vy * ny);
+  // Ensure puck bounces away with minimum speed to escape the mallet
+  const postNormalSpeed = puck.vx * nx + puck.vy * ny;
+  const minBounce = Math.max(350, strikeSpeed * 0.5);
+  if (postNormalSpeed < minBounce) {
+    puck.vx += nx * (minBounce - postNormalSpeed);
+    puck.vy += ny * (minBounce - postNormalSpeed);
+  }
+
   const impactSpeed = Math.max(0, -relativeNormalSpeed);
-  const intensity = clamp((impactSpeed + strikeSpeed * 0.34) / 2800, 0.14, 0.86);
+  const intensity = clamp((impactSpeed + strikeSpeed * 0.34) / 3500, 0.14, 0.86);
 
   capPuckSpeed(puck);
   room.updatedAt = Date.now();
