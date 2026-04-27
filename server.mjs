@@ -620,8 +620,15 @@ function updateInput(client, message) {
   const dy = constrained.y - previousY;
   const speed = Math.hypot(dx, dy) * PHYSICS_HZ;
   const velocityScale = speed > HUMAN_MALLET_MAX_SPEED ? HUMAN_MALLET_MAX_SPEED / speed : 1;
-  mallet.sweepFromX = previousX;
-  mallet.sweepFromY = previousY;
+  const keepExistingSweep =
+    Number.isFinite(mallet.sweepFromX) &&
+    Number.isFinite(mallet.sweepFromY) &&
+    mallet.directInputUntil &&
+    Date.now() < mallet.directInputUntil;
+  if (!keepExistingSweep) {
+    mallet.sweepFromX = previousX;
+    mallet.sweepFromY = previousY;
+  }
   mallet.x = constrained.x;
   mallet.y = constrained.y;
   mallet.targetX = constrained.x;
@@ -665,6 +672,15 @@ function tickRooms() {
         stepPucks(room, DT / PUCK_SUBSTEPS);
       }
     }
+
+    finalizeMalletSweeps(room.state);
+  }
+}
+
+function finalizeMalletSweeps(state) {
+  for (const mallet of state.mallets) {
+    mallet.sweepFromX = mallet.x;
+    mallet.sweepFromY = mallet.y;
   }
 }
 

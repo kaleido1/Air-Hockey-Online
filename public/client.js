@@ -1049,20 +1049,24 @@ function drawMainMenu(interactive) {
   const labels = [t("mainSingle"), t("mainLocal"), t("mainWireless"), t("mainOnline")];
   const actions = [
     () => {
+      unlockAudio();
       clearRoomUrl();
       pendingStartMode = "bot";
       showUi("puck");
     },
     () => {
+      unlockAudio();
       clearRoomUrl();
       pendingStartMode = "local";
       showUi("puck");
     },
     () => {
+      unlockAudio();
       pendingStartMode = "lan";
       showUi("lan");
     },
     () => {
+      unlockAudio();
       pendingStartMode = "online";
       showUi("online");
     },
@@ -1448,7 +1452,6 @@ function drawGoalOverlay(state) {
 }
 
 function drawRestartBubble() {
-  drawMallet({ x: TABLE.width / 2, y: 112 });
   ctx.save();
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
@@ -1459,35 +1462,29 @@ function drawRestartBubble() {
   ctx.fillText(t("resetGame"), TABLE.width / 2, 108);
   ctx.translate(TABLE.width / 2, 182);
   ctx.shadowBlur = 0;
+  ctx.shadowColor = "rgba(115,170,255,0.68)";
+  ctx.shadowBlur = 9;
   ctx.strokeStyle = "#2d61bb";
-  ctx.lineWidth = 8;
+  ctx.lineWidth = 8.5;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.beginPath();
-  ctx.arc(0, 0, 21, -0.42, Math.PI * 1.54);
+  ctx.arc(0, 0, 22, -0.46, Math.PI * 1.5);
   ctx.stroke();
-
-  ctx.strokeStyle = "rgba(255,255,255,0.94)";
-  ctx.lineWidth = 2.5;
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = "rgba(255,255,255,0.96)";
+  ctx.lineWidth = 1.9;
   ctx.beginPath();
-  ctx.arc(0, 0, 20.2, -0.42, Math.PI * 1.5);
+  ctx.arc(0, 0, 20.6, -0.36, Math.PI * 1.33);
   ctx.stroke();
 
   ctx.fillStyle = "#2d61bb";
   ctx.beginPath();
   ctx.moveTo(-20.5, -18.5);
-  ctx.lineTo(2.5, -29);
-  ctx.lineTo(-2.5, -7.5);
+  ctx.lineTo(5.5, -30.5);
+  ctx.lineTo(-1.2, -4.8);
   ctx.closePath();
   ctx.fill();
-
-  ctx.strokeStyle = "rgba(255,255,255,0.9)";
-  ctx.lineWidth = 1.8;
-  ctx.beginPath();
-  ctx.moveTo(-17.5, -17.5);
-  ctx.lineTo(-1.4, -24.5);
-  ctx.lineTo(-4.8, -10.5);
-  ctx.stroke();
   ctx.restore();
 }
 
