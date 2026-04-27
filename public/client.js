@@ -256,7 +256,12 @@ requestAnimationFrame(render);
 
 window.addEventListener("resize", resizeCanvas);
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") startRefreshRateSampling();
+  if (document.visibilityState !== "visible") return;
+  startRefreshRateSampling();
+  if (!connected) {
+    clearTimeout(reconnectTimer);
+    connect();
+  }
 });
 window.addEventListener("pointerdown", unlockAudio, { capture: true, passive: true });
 window.addEventListener("touchstart", unlockAudio, { capture: true, passive: true });

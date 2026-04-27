@@ -45,6 +45,7 @@ const PUCK_SUBSTEPS = 18;
 const FRICTION_PER_SECOND = 0.991;
 const STUCK_SPEED = 95;
 const STUCK_SECONDS = 0.38;
+const RECONNECT_GRACE_MS = 180_000;
 
 const rooms = new Map();
 const clients = new Map();
@@ -459,7 +460,8 @@ function addPlayer(room, client, playerIndex) {
     key: client.playerKey,
     name: `Player ${playerIndex + 1}`,
     bot: false,
-    connected: true
+    connected: true,
+    disconnectedAt: 0
   };
   client.roomCode = room.code;
   client.playerIndex = playerIndex;
@@ -572,6 +574,30 @@ function closeFinishedRoom(room) {
   rooms.delete(room.code);
 }
 
+function reserveDisconnectedPlayer(client) {
+  const room = currentRoom(client);
+  if (!room || client.playerIndex === null || room.settings.local) return false;
+
+  const player = room.players[client.playerIndex];
+  if (!player || player.id !== client.id) return false;
+
+  player.connected = false;
+  player.disconnectedAt = Date.now();
+  room.updatedAt = Date.now();
+  if (room.state.phase === "playing" || room.state.phase === "countdown" || room.state.phase === "paused") {
+    room.state.phase = "waiting";
+    room.state.phaseEndsAt = 0;
+  }
+
+  broadcastRoom(room, {
+    type: "room",
+    code: room.code,
+    players: publicPlayers(room),
+    settings: room.settings
+  });
+  return true;
+}
+
 function leaveRoom(client, notify = true) {
   removeFromQueue(client);
 
@@ -628,7 +654,9 @@ function leaveRoom(client, notify = true) {
 function disconnect(client) {
   if (!clients.has(client.id)) return;
   clients.delete(client.id);
-  leaveRoom(client, true);
+  if (!reserveDisconnectedPlayer(client)) {
+    leaveRoom(client, true);
+  }
   if (!client.socket.destroyed) client.socket.destroy();
 }
 
@@ -1619,13 +1647,37 @@ function cleanupRooms() {
   }
 
   for (const [code, room] of rooms.entries()) {
-    const hasConnectedHuman = room.players.some(
-      (player) => player && !player.bot && clients.has(player.id)
-    );
-    if (!hasConnectedHuman && now - room.updatedAt > 30_000) {
+    pruneExpiredDisconnectedPlayers(room, now);
+    const hasRetainedHuman = room.players.some((player) => {
+      if (!player || player.bot) return false;
+      if (player.connected && clients.has(player.id)) return true;
+      return Boolean(player.disconnectedAt && now - player.disconnectedAt < RECONNECT_GRACE_MS);
+    });
+    if (!hasRetainedHuman && now - room.updatedAt > 30_000) {
       rooms.delete(code);
     }
   }
+}
+
+function pruneExpiredDisconnectedPlayers(room, now = Date.now()) {
+  let changed = false;
+  for (let index = 0; index < room.players.length; index += 1) {
+    const player = room.players[index];
+    if (!player || player.bot) continue;
+    if (player.connected) continue;
+    if (!player.disconnectedAt || now - player.disconnectedAt < RECONNECT_GRACE_MS) continue;
+    room.players[index] = null;
+    changed = true;
+  }
+
+  if (!changed) return;
+  room.updatedAt = now;
+  broadcastRoom(room, {
+    type: "room",
+    code: room.code,
+    players: publicPlayers(room),
+    settings: room.settings
+  });
 }
 
 function emitFx(room, kind, force = false, intensity = 0.5) {
@@ -1679,7 +1731,7 @@ function sendFrame(client, payload, opcode = 0x1) {
 function publicPlayers(room) {
   return room.players.map((player, index) => ({
     index,
-    connected: Boolean(player),
+    connected: Boolean(player && (player.bot || (player.connected && clients.has(player.id)))),
     bot: Boolean(player?.bot),
     local: Boolean(player?.local)
   }));
