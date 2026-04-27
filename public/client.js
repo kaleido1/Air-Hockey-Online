@@ -22,7 +22,11 @@ const els = {
   restartButton: document.querySelector("#restartButton"),
   leaveButton: document.querySelector("#leaveButton"),
   onePuckButton: document.querySelector("#onePuckButton"),
-  twoPuckButton: document.querySelector("#twoPuckButton")
+  twoPuckButton: document.querySelector("#twoPuckButton"),
+  eyebrow: document.querySelector(".eyebrow"),
+  panelTitle: document.querySelector(".panel h1"),
+  joinButton: document.querySelector("#joinForm button"),
+  metaLabels: document.querySelectorAll(".meta dt")
 };
 
 const TABLE = {
@@ -46,6 +50,130 @@ const colors = {
   railLight: "#f6f7f4"
 };
 
+const LANGUAGE_STORAGE_KEY = "air-hockey-online-language";
+const translations = {
+  zh: {
+    you: "你",
+    opponent: "对手",
+    bot: "电脑",
+    offline: "离线",
+    online: "在线",
+    connecting: "连接中",
+    error: "错误",
+    reconnecting: "重新连接",
+    chooseMode: "选择模式",
+    searching: "搜索中",
+    waitingOpponent: "等待对手",
+    practice: "练习",
+    rejoining: "重新加入",
+    getReady: "准备",
+    notice: "提示",
+    goal: "进球",
+    victory: "胜利",
+    defeat: "失败",
+    mainSingle: "单人游戏",
+    mainLocal: "双人游戏",
+    mainWireless: "无线双人游戏",
+    puckTitle: "选择冰球数量",
+    onePuck: "1 个冰球",
+    twoPuck: "2 个冰球",
+    wirelessTitle: "无线双人游戏",
+    wirelessHint: "两名玩家点击加入即可开始",
+    joinBattle: "加入对战",
+    back: "返回",
+    waitingOtherPlayer: "等待另一名玩家",
+    waitingOtherPlayerJoin: "等待另一名玩家加入",
+    readyToStart: "准备开始",
+    waitingJoin: "等待对手加入",
+    backMenu: "返回菜单",
+    unavailable: "暂不可用",
+    paused: "已暂停",
+    pauseTouchHint: "双击中间取消暂停",
+    pauseKeyHint: "按空格取消暂停",
+    returnMain: "返回主界面",
+    resetGame: "重置游戏",
+    linkCopied: "链接已复制",
+    opponentLeft: "对手已离开",
+    unableJoin: "无法加入对战",
+    roomNotFound: "房间不存在",
+    roomFull: "房间已满",
+    quickMatch: "快速匹配",
+    createRoom: "创建房间",
+    practiceBot: "练习电脑",
+    roomCode: "房间码",
+    join: "加入",
+    copyLink: "复制链接",
+    restart: "重开本局",
+    leave: "离开",
+    firstToSeven: "先到 7 分",
+    room: "房间",
+    status: "状态",
+    ping: "延迟",
+    languageButton: "EN"
+  },
+  en: {
+    you: "You",
+    opponent: "Opponent",
+    bot: "Bot",
+    offline: "Offline",
+    online: "Online",
+    connecting: "Connecting",
+    error: "Error",
+    reconnecting: "Reconnecting",
+    chooseMode: "Choose a mode",
+    searching: "Searching",
+    waitingOpponent: "Waiting for opponent",
+    practice: "Practice",
+    rejoining: "Rejoining",
+    getReady: "Get ready",
+    notice: "Notice",
+    goal: "Goal",
+    victory: "Victory",
+    defeat: "Defeat",
+    mainSingle: "Single Player",
+    mainLocal: "Two Players",
+    mainWireless: "Wireless Two Players",
+    puckTitle: "Choose Pucks",
+    onePuck: "1 Puck",
+    twoPuck: "2 Pucks",
+    wirelessTitle: "Wireless Two Players",
+    wirelessHint: "Both players tap Join to start",
+    joinBattle: "Join Battle",
+    back: "Back",
+    waitingOtherPlayer: "Waiting for another player",
+    waitingOtherPlayerJoin: "Waiting for another player",
+    readyToStart: "Ready",
+    waitingJoin: "Waiting for opponent",
+    backMenu: "Back to Menu",
+    unavailable: "Unavailable",
+    paused: "Paused",
+    pauseTouchHint: "Double tap center to resume",
+    pauseKeyHint: "Press Space to resume",
+    returnMain: "Back to Menu",
+    resetGame: "Reset Game",
+    linkCopied: "Link copied",
+    opponentLeft: "Opponent left",
+    unableJoin: "Unable to join",
+    roomNotFound: "Room not found",
+    roomFull: "Room is full",
+    quickMatch: "Quick Match",
+    createRoom: "Create Room",
+    practiceBot: "Practice Bot",
+    roomCode: "Room code",
+    join: "Join",
+    copyLink: "Copy Link",
+    restart: "Restart",
+    leave: "Leave",
+    firstToSeven: "First to 7",
+    room: "Room",
+    status: "Status",
+    ping: "Ping",
+    languageButton: "中"
+  }
+};
+
+let currentLanguage = getInitialLanguage();
+
 let socket = null;
 let connected = false;
 let playerIndex = null;
@@ -54,6 +182,7 @@ let roomCode = "";
 let roomSettings = null;
 let serverState = null;
 let previousState = null;
+let roomPlayers = null;
 let pendingRoomFromUrl = new URLSearchParams(location.search).get("room") || "";
 let pointerDown = false;
 const lastInputAtByPlayer = [0, 0];
@@ -61,7 +190,8 @@ let lastPingSentAt = 0;
 let reconnectTimer = 0;
 let heartbeatTimer = 0;
 let audio = null;
-let statusText = "Choose a mode";
+let statusRaw = "chooseMode";
+let statusText = t("chooseMode");
 const playerKey = getPlayerKey();
 
 const trails = new Map();
@@ -84,6 +214,7 @@ let puckSprite = null;
 let canvasMetrics = null;
 let currentCursor = "";
 
+applyLanguage();
 connect();
 resizeCanvas();
 requestAnimationFrame(render);
@@ -95,17 +226,17 @@ els.twoPuckButton.addEventListener("click", () => setPuckCount(2));
 els.quickButton.addEventListener("click", () => {
   unlockAudio();
   send({ type: "quick", puckCount });
-  setStatus("Searching");
+  setStatus("searching");
 });
 els.createButton.addEventListener("click", () => {
   unlockAudio();
   send({ type: "create", puckCount });
-  setStatus("Waiting for opponent");
+  setStatus("waitingOpponent");
 });
 els.botButton.addEventListener("click", () => {
   unlockAudio();
   send({ type: "create", puckCount, bot: true });
-  setStatus("Practice");
+  setStatus("practice");
 });
 els.joinForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -119,7 +250,7 @@ els.copyButton.addEventListener("click", async () => {
   url.searchParams.set("room", roomCode);
   try {
     await navigator.clipboard.writeText(url.href);
-    setStatus("Link copied");
+    setStatus("linkCopied");
   } catch {
     setStatus(roomCode);
   }
@@ -201,11 +332,11 @@ function connect() {
 
   socket.addEventListener("open", () => {
     connected = true;
-    els.connectionStatus.textContent = "Online";
+    els.connectionStatus.textContent = t("online");
     setButtons();
     if (roomCode && playerIndex !== null) {
       send({ type: "join", code: roomCode, preferredIndex: playerIndex });
-      setStatus("Rejoining");
+      setStatus("rejoining");
     }
     heartbeat();
   });
@@ -218,14 +349,14 @@ function connect() {
   socket.addEventListener("close", () => {
     connected = false;
     clearTimeout(heartbeatTimer);
-    els.connectionStatus.textContent = "Offline";
-    setStatus("Reconnecting");
+    els.connectionStatus.textContent = t("offline");
+    setStatus("reconnecting");
     setButtons();
     reconnectTimer = setTimeout(connect, 900);
   });
 
   socket.addEventListener("error", () => {
-    els.connectionStatus.textContent = "Error";
+    els.connectionStatus.textContent = t("error");
   });
 }
 
@@ -246,7 +377,7 @@ function handleMessage(message) {
       break;
     case "queued":
       showUi("waiting");
-      setStatus("Searching");
+      setStatus("searching");
       break;
     case "joined":
       roomCode = message.code;
@@ -254,18 +385,19 @@ function handleMessage(message) {
       roomSettings = message.settings;
       puckCount = message.settings.puckCount;
       setPuckCount(puckCount, false);
-      setStatus(playerIndex === 0 ? "Waiting for opponent" : "Get ready");
+      setStatus(playerIndex === 0 ? "waitingOpponent" : "getReady");
       showUi("waiting");
       setButtons();
       updateRoomLabels();
       break;
     case "room":
+      roomPlayers = message.players || roomPlayers;
       updateRoomLabels(message);
-      if (message.players?.[1]?.bot) setStatus("Practice");
+      if (message.players?.[1]?.bot) setStatus("practice");
       break;
     case "started":
       showUi(null);
-      setStatus("Get ready");
+      setStatus("getReady");
       break;
     case "state":
       previousState = serverState;
@@ -299,15 +431,15 @@ function handleMessage(message) {
     case "notice":
       if (message.message === "Opponent left the room") {
         clearRoom();
-        setUiNotice("对手已离开");
+        setUiNotice("opponentLeft");
       } else if (message.message) {
         setUiNotice(message.message);
       }
-      setStatus(message.message || "Notice");
+      setStatus(message.message || "notice");
       break;
     case "error":
-      setUiNotice(message.message || "无法加入对战");
-      setStatus(message.message || "Error");
+      setUiNotice(message.message || "unableJoin");
+      setStatus(message.message || "error");
       break;
     case "pong":
       if (message.at) {
@@ -330,6 +462,83 @@ function heartbeat() {
   heartbeatTimer = setTimeout(heartbeat, 700);
 }
 
+function getInitialLanguage() {
+  try {
+    const saved = localStorage.getItem(LANGUAGE_STORAGE_KEY);
+    if (saved === "zh" || saved === "en") return saved;
+  } catch {
+    // Ignore storage failures in private browsing modes.
+  }
+  return navigator.language?.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+function t(key) {
+  return translations[currentLanguage]?.[key] || translations.en[key] || key;
+}
+
+function translateStatus(text) {
+  const statusMap = {
+    "Choose a mode": "chooseMode",
+    Searching: "searching",
+    "Waiting for opponent": "waitingOpponent",
+    Practice: "practice",
+    Reconnecting: "reconnecting",
+    Rejoining: "rejoining",
+    "Get ready": "getReady",
+    Goal: "goal",
+    Notice: "notice",
+    Error: "error",
+    "Link copied": "linkCopied",
+    "Opponent left the room": "opponentLeft",
+    "Room not found": "roomNotFound",
+    "Room is full": "roomFull",
+    胜利: "victory",
+    失败: "defeat",
+    对手已离开: "opponentLeft",
+    无法加入对战: "unableJoin",
+    等待另一名玩家: "waitingOtherPlayer",
+    链接已复制: "linkCopied"
+  };
+  const key = statusMap[text] || text;
+  return translations[currentLanguage]?.[key] || key || "";
+}
+
+function toggleLanguage() {
+  currentLanguage = currentLanguage === "zh" ? "en" : "zh";
+  try {
+    localStorage.setItem(LANGUAGE_STORAGE_KEY, currentLanguage);
+  } catch {
+    // Language still changes for the current session.
+  }
+  applyLanguage();
+}
+
+function applyLanguage() {
+  document.documentElement.lang = currentLanguage === "zh" ? "zh-CN" : "en";
+  els.youLabel.textContent = t("you");
+  els.opponentLabel.textContent = t("opponent");
+  els.roomPill.textContent = roomCode || t("offline");
+  els.connectionStatus.textContent = connected ? t("online") : t("connecting");
+  els.eyebrow.textContent = "Air Hockey Online";
+  els.panelTitle.textContent = t("firstToSeven");
+  els.onePuckButton.textContent = t("onePuck");
+  els.twoPuckButton.textContent = t("twoPuck");
+  els.quickButton.textContent = t("quickMatch");
+  els.createButton.textContent = t("createRoom");
+  els.botButton.textContent = t("practiceBot");
+  els.roomInput.placeholder = t("roomCode");
+  els.roomInput.setAttribute("aria-label", t("roomCode"));
+  els.joinButton.textContent = t("join");
+  els.copyButton.textContent = t("copyLink");
+  els.restartButton.textContent = t("restart");
+  els.leaveButton.textContent = t("leave");
+  [t("room"), t("status"), t("ping")].forEach((label, index) => {
+    if (els.metaLabels[index]) els.metaLabels[index].textContent = label;
+  });
+  setStatus(statusRaw);
+  updateScoreboard();
+}
+
 function setPuckCount(count, updateButtons = true) {
   puckCount = count === 2 ? 2 : 1;
   if (updateButtons) {
@@ -342,22 +551,23 @@ function setPuckCount(count, updateButtons = true) {
 
 function updateScoreboard(message = {}) {
   if (!serverState) return;
+  roomPlayers = message.players || roomPlayers;
   const scores = serverState.scores || [0, 0];
   const self = playerIndex === 1 ? 1 : 0;
   const opponent = self === 0 ? 1 : 0;
   els.youScore.textContent = scores[self] ?? 0;
   els.opponentScore.textContent = scores[opponent] ?? 0;
 
-  if (message.players) {
-    const opponentInfo = message.players[opponent];
-    els.opponentLabel.textContent = opponentInfo?.bot ? "Bot" : "Opponent";
+  if (roomPlayers) {
+    const opponentInfo = roomPlayers[opponent];
+    els.opponentLabel.textContent = opponentInfo?.bot ? t("bot") : t("opponent");
   }
 }
 
 function updateRoomLabels(message = {}) {
   const code = message.code || roomCode || "-";
   els.roomCode.textContent = code;
-  els.roomPill.textContent = roomCode ? code : "Offline";
+  els.roomPill.textContent = roomCode ? code : t("offline");
   els.roomInput.value = roomCode ? roomCode : els.roomInput.value;
   if (roomCode && roomSettings?.lan) {
     const url = new URL(location.href);
@@ -373,7 +583,7 @@ function updatePhaseText() {
   if (!serverState) return;
   const phase = serverState.phase;
   if (phase === "waiting") {
-    setStatus("Waiting for opponent");
+    setStatus("waitingOpponent");
   } else if (phase === "countdown") {
     setStatus("");
   } else if (phase === "playing") {
@@ -381,21 +591,22 @@ function updatePhaseText() {
   } else if (phase === "paused") {
     setStatus("");
   } else if (phase === "point") {
-    setStatus("Goal");
+    setStatus("goal");
   } else if (phase === "gameover") {
     if (isLocalGame()) {
       setStatus("");
       return;
     }
     const self = playerIndex === 1 ? 1 : 0;
-    setStatus(serverState.winner === self ? "胜利" : "失败");
+    setStatus(serverState.winner === self ? "victory" : "defeat");
   }
 }
 
 function setStatus(text) {
-  statusText = text;
-  els.centerStatus.textContent = text || "";
-  els.centerStatus.classList.toggle("hidden", !text);
+  statusRaw = text || "";
+  statusText = translateStatus(statusRaw);
+  els.centerStatus.textContent = statusText || "";
+  els.centerStatus.classList.toggle("hidden", !statusText);
 }
 
 function setButtons() {
@@ -419,12 +630,15 @@ function clearRoom() {
   roomSettings = null;
   serverState = null;
   previousState = null;
+  roomPlayers = null;
   trails.clear();
   els.roomCode.textContent = "-";
-  els.roomPill.textContent = "Offline";
+  els.roomPill.textContent = t("offline");
+  els.youLabel.textContent = t("you");
+  els.opponentLabel.textContent = t("opponent");
   els.youScore.textContent = "0";
   els.opponentScore.textContent = "0";
-  setStatus("Choose a mode");
+  setStatus("chooseMode");
   showUi("main");
   setButtons();
   history.replaceState(null, "", location.pathname);
@@ -566,7 +780,8 @@ function showUi(screen) {
 }
 
 function setUiNotice(text) {
-  statusText = text;
+  statusRaw = text || "";
+  statusText = translateStatus(statusRaw);
   showUi("notice");
   setTimeout(() => {
     if (uiScreen === "notice") showUi("main");
@@ -579,7 +794,7 @@ function startSelectedMode(count) {
   if (pendingStartMode === "bot") {
     clearRoomUrl();
     send({ type: "create", puckCount: count, bot: true });
-    setStatus("Practice");
+    setStatus("practice");
     showUi(null);
   } else if (pendingStartMode === "local") {
     clearRoomUrl();
@@ -594,7 +809,7 @@ function startSelectedMode(count) {
     } else {
       send({ type: "create", puckCount: count });
     }
-    setStatus("Waiting for opponent");
+    setStatus("waitingOpponent");
     showUi("waiting");
   }
 }
@@ -772,7 +987,7 @@ function drawMainMenu(interactive) {
 
   drawMiniPucks(x + 122, y + 32);
 
-  const labels = ["单人游戏", "双人游戏", "无线双人游戏", "排行榜", "成就"];
+  const labels = [t("mainSingle"), t("mainLocal"), t("mainWireless")];
   const actions = [
     () => {
       clearRoomUrl();
@@ -795,6 +1010,31 @@ function drawMainMenu(interactive) {
     drawRedButton(button.x, button.y, button.w, button.h, labels[index], 29);
     if (interactive) addButton(button, actions[index]);
   }
+
+  drawLanguageButton(interactive);
+}
+
+function drawLanguageButton(interactive) {
+  const button = { x: TABLE.width - 104, y: TABLE.height - 92, w: 70, h: 46 };
+  ctx.save();
+  ctx.fillStyle = "rgba(24,45,82,0.82)";
+  ctx.strokeStyle = "rgba(255,255,255,0.82)";
+  ctx.lineWidth = 2.5;
+  ctx.shadowColor = "rgba(0,0,0,0.38)";
+  ctx.shadowBlur = 4;
+  ctx.shadowOffsetY = 2;
+  ctx.beginPath();
+  ctx.roundRect(button.x, button.y, button.w, button.h, 12);
+  ctx.fill();
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = "900 22px Arial, sans-serif";
+  ctx.fillStyle = "#ffffff";
+  ctx.fillText(t("languageButton"), button.x + button.w / 2, button.y + button.h / 2 + 1);
+  ctx.restore();
+  if (interactive) addButton(button, toggleLanguage);
 }
 
 function drawPuckMenu(interactive) {
@@ -812,13 +1052,13 @@ function drawPuckMenu(interactive) {
   ctx.shadowColor = "rgba(0,0,0,0.58)";
   ctx.shadowBlur = 2;
   ctx.shadowOffsetY = 3;
-  ctx.fillText("选择冰球数量", x + w / 2, y + 58);
+  ctx.fillText(t("puckTitle"), x + w / 2, y + 58);
   ctx.restore();
 
   const one = { x: x + 18, y: y + 94, w: w - 36, h: 54 };
   const two = { x: x + 18, y: y + 164, w: w - 36, h: 54 };
-  drawRedButton(one.x, one.y, one.w, one.h, "1 个冰球", 29);
-  drawRedButton(two.x, two.y, two.w, two.h, "2 个冰球", 29);
+  drawRedButton(one.x, one.y, one.w, one.h, t("onePuck"), 29);
+  drawRedButton(two.x, two.y, two.w, two.h, t("twoPuck"), 29);
 
   if (interactive) {
     addButton(one, () => startSelectedMode(1));
@@ -841,21 +1081,21 @@ function drawLanMenu(interactive) {
   ctx.shadowBlur = 2;
   ctx.shadowOffsetY = 3;
   ctx.font = "800 32px Arial, sans-serif";
-  ctx.fillText("无线双人游戏", x + w / 2, y + 56);
+  ctx.fillText(t("wirelessTitle"), x + w / 2, y + 56);
   ctx.font = "700 21px Arial, sans-serif";
-  ctx.fillText("两名玩家点击加入即可开始", x + w / 2, y + 92);
+  ctx.fillText(t("wirelessHint"), x + w / 2, y + 92);
   ctx.restore();
 
   const join = { x: x + 18, y: y + 120, w: w - 36, h: 56 };
   const back = { x: x + 18, y: y + 188, w: w - 36, h: 48 };
-  drawRedButton(join.x, join.y, join.w, join.h, "加入对战", 30);
-  drawRedButton(back.x, back.y, back.w, back.h, "返回", 24);
+  drawRedButton(join.x, join.y, join.w, join.h, t("joinBattle"), 30);
+  drawRedButton(back.x, back.y, back.w, back.h, t("back"), 24);
 
   if (interactive) {
     addButton(join, () => {
       unlockAudio();
       send({ type: "lan", puckCount });
-      setStatus("等待另一名玩家");
+      setStatus("waitingOtherPlayer");
       showUi("waiting");
     });
     addButton(back, () => showUi("main"));
@@ -877,13 +1117,13 @@ function drawWaitingMenu(interactive) {
   ctx.shadowBlur = 2;
   ctx.shadowOffsetY = 3;
   ctx.font = "800 34px Arial, sans-serif";
-  ctx.fillText(statusText || "等待对手加入", x + w / 2, y + 62);
+  ctx.fillText(statusText || t("waitingJoin"), x + w / 2, y + 62);
   ctx.font = "700 22px Arial, sans-serif";
-  ctx.fillText(roomSettings?.lan ? "等待另一名玩家加入" : "准备开始", x + w / 2, y + 122);
+  ctx.fillText(roomSettings?.lan ? t("waitingOtherPlayerJoin") : t("readyToStart"), x + w / 2, y + 122);
   ctx.restore();
 
   const back = { x: x + 26, y: y + h - 66, w: w - 52, h: 48 };
-  drawRedButton(back.x, back.y, back.w, back.h, "返回菜单", 25);
+  drawRedButton(back.x, back.y, back.w, back.h, t("backMenu"), 25);
 
   if (interactive) {
     addButton(back, () => {
@@ -907,7 +1147,7 @@ function drawNoticeMenu(interactive) {
   ctx.shadowColor = "rgba(0,0,0,0.58)";
   ctx.shadowBlur = 2;
   ctx.shadowOffsetY = 3;
-  ctx.fillText(statusText || "暂不可用", x + w / 2, y + h / 2);
+  ctx.fillText(statusText || t("unavailable"), x + w / 2, y + h / 2);
   ctx.restore();
 
   if (interactive) addButton({ x, y, w, h }, () => showUi("main"));
@@ -941,12 +1181,12 @@ function drawPauseOverlay() {
   ctx.strokeStyle = "rgba(255,255,255,0.78)";
   ctx.shadowColor = "rgba(15,55,128,0.88)";
   ctx.shadowBlur = 12;
-  ctx.strokeText("已暂停", TABLE.width / 2, 515);
+  ctx.strokeText(t("paused"), TABLE.width / 2, 515);
   ctx.fillStyle = "#2f63bd";
-  ctx.fillText("已暂停", TABLE.width / 2, 515);
+  ctx.fillText(t("paused"), TABLE.width / 2, 515);
   ctx.font = "800 32px Arial, sans-serif";
   ctx.lineWidth = 5;
-  const pauseHint = touchCapable ? "双击中间取消暂停" : "按空格取消暂停";
+  const pauseHint = touchCapable ? t("pauseTouchHint") : t("pauseKeyHint");
   ctx.strokeText(pauseHint, TABLE.width / 2, 565);
   ctx.fillStyle = "#ffffff";
   ctx.fillText(pauseHint, TABLE.width / 2, 565);
@@ -1003,16 +1243,16 @@ function drawGameOverOverlay(state) {
   ctx.strokeStyle = "rgba(255,255,255,0.9)";
   ctx.shadowColor = won ? "rgba(255,213,66,0.95)" : "rgba(35,83,170,0.95)";
   ctx.shadowBlur = 18;
-  ctx.strokeText(won ? "胜利" : "失败", 0, -20);
+  ctx.strokeText(won ? t("victory") : t("defeat"), 0, -20);
   ctx.fillStyle = won ? "#ffcf38" : "#3c6fc6";
-  ctx.fillText(won ? "胜利" : "失败", 0, -20);
+  ctx.fillText(won ? t("victory") : t("defeat"), 0, -20);
 
   ctx.font = "800 30px Arial, sans-serif";
   ctx.lineWidth = 4;
   ctx.strokeStyle = "rgba(0,0,0,0.45)";
-  ctx.strokeText("返回主界面", 0, 58);
+  ctx.strokeText(t("returnMain"), 0, 58);
   ctx.fillStyle = "#ffffff";
-  ctx.fillText("返回主界面", 0, 58);
+  ctx.fillText(t("returnMain"), 0, 58);
   ctx.restore();
 }
 
@@ -1054,16 +1294,16 @@ function drawLocalGameOverOverlay(state) {
   ctx.strokeStyle = "rgba(255,255,255,0.92)";
   ctx.shadowColor = "rgba(255,213,66,0.95)";
   ctx.shadowBlur = 18;
-  ctx.strokeText("胜利", 0, -20);
+  ctx.strokeText(t("victory"), 0, -20);
   ctx.fillStyle = "#ffcf38";
-  ctx.fillText("胜利", 0, -20);
+  ctx.fillText(t("victory"), 0, -20);
 
   ctx.font = "800 28px Arial, sans-serif";
   ctx.lineWidth = 4;
   ctx.strokeStyle = "rgba(0,0,0,0.45)";
-  ctx.strokeText("返回主界面", 0, 54);
+  ctx.strokeText(t("returnMain"), 0, 54);
   ctx.fillStyle = "#ffffff";
-  ctx.fillText("返回主界面", 0, 54);
+  ctx.fillText(t("returnMain"), 0, 54);
   ctx.restore();
 }
 
@@ -1092,9 +1332,9 @@ function drawGoalOverlay(state) {
   ctx.shadowColor = "rgba(255,255,255,0.9)";
   ctx.shadowBlur = 10;
   ctx.strokeStyle = "rgba(255,255,255,0.95)";
-  ctx.strokeText("Goal", 0, 0);
+  ctx.strokeText(t("goal"), 0, 0);
   ctx.fillStyle = "#2f63bd";
-  ctx.fillText("Goal", 0, 0);
+  ctx.fillText(t("goal"), 0, 0);
 
   ctx.restore();
 }
@@ -1108,7 +1348,7 @@ function drawRestartBubble() {
   ctx.fillStyle = "#376bbf";
   ctx.shadowColor = "rgba(255,255,255,0.86)";
   ctx.shadowBlur = 6;
-  ctx.fillText("重置游戏", TABLE.width / 2, 108);
+  ctx.fillText(t("resetGame"), TABLE.width / 2, 108);
   ctx.translate(TABLE.width / 2, 176);
   ctx.strokeStyle = "#2f63bd";
   ctx.lineWidth = 8;
@@ -1266,10 +1506,14 @@ function drawGameModePill() {
   ctx.font = "900 34px Arial, sans-serif";
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  ctx.fillText("游戏模式：打开", x + 76, y + 26);
+  ctx.fillText(currentLanguage === "zh" ? "游戏模式：打开" : "Game Mode: On", x + 76, y + 26);
   ctx.font = "700 21px Arial, sans-serif";
   ctx.fillStyle = "rgba(255,255,255,0.68)";
-  ctx.fillText("在控制中心访问游戏叠层", x + 76, y + 52);
+  ctx.fillText(
+    currentLanguage === "zh" ? "在控制中心访问游戏叠层" : "Open game overlay from Control Center",
+    x + 76,
+    y + 52
+  );
   drawRocketIcon(x + 44, y + 36);
   ctx.restore();
 }
@@ -1319,7 +1563,7 @@ async function copyInviteLink() {
   url.searchParams.set("room", roomCode);
   try {
     await navigator.clipboard.writeText(url.href);
-    setStatus("链接已复制");
+    setStatus("linkCopied");
   } catch {
     setStatus(roomCode);
   }

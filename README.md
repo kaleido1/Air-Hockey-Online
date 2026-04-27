@@ -1,41 +1,39 @@
 # Air Hockey Online
 
-Play here:
+Air Hockey Online is a browser-based air hockey game with polished arcade-style visuals, responsive touch controls, AI practice, same-device multiplayer, and wireless online multiplayer.
+
+Play now:
 
 https://air-hockey-online-kaleido1.onrender.com/
 
-Air Hockey Online is a browser air hockey game with single-player, local two-player, and online multiplayer modes.
-
-## Online Play
-
-The Render link runs the full Node/WebSocket game server, so single-player, local two-player, and wireless multiplayer all work from the browser.
-
-On Render's free plan, the first visit after inactivity can take a short moment to wake up.
-
-## Run Full Server Locally
-
-```sh
-npm run dev
-```
-
-Open `http://127.0.0.1:3100`.
-
-For LAN testing on another device:
-
-```sh
-HOSTNAME=0.0.0.0 PORT=3100 npm run dev
-```
-
-Then open the computer's LAN IP from the other device.
-
-Environment variables:
-
-- `HOST` or `HOSTNAME` defaults to `127.0.0.1`
-- `PORT` defaults to `3100`
+> Render free services may take a short moment to wake up after inactivity.
 
 ## Features
 
-- Fast air hockey physics with wall banks, mallet strikes, and first-to-7 scoring.
-- One-puck and two-puck games.
-- Quick match, private room codes, and practice against a bot.
-- Server-authoritative WebSocket sync, so both players share the same puck state.
+- Single-player mode with rhythm-based AI behavior.
+- Same-device two-player mode with multi-touch support.
+- Wireless two-player mode powered by WebSocket room sync.
+- One-puck and two-puck match options.
+- First-to-7 scoring with animated goal, win, and loss states.
+- Touch-friendly controls, keyboard pause support, and smooth canvas rendering.
+- Chinese and English interface with automatic language detection.
+
+## Technology
+
+- Node.js HTTP server with a lightweight WebSocket implementation.
+- Canvas-based rendering for the game table, mallets, pucks, menus, and overlays.
+- Server-authoritative game physics for synchronized multiplayer state.
+- Render deployment via `render.yaml`.
+
+## Deployment
+
+The production build runs as a Render Web Service:
+
+- Build command: `npm install`
+- Start command: `npm start`
+- Runtime: Node.js
+- Required host binding: `HOST=0.0.0.0`
+
+The live URL is:
+
+https://air-hockey-online-kaleido1.onrender.com/

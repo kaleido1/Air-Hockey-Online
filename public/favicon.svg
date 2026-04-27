@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="table" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="#8fb7f0"/>
+      <stop offset="1" stop-color="#285998"/>
+    </linearGradient>
+    <radialGradient id="mallet" cx=".32" cy=".28" r=".78">
+      <stop offset="0" stop-color="#fffdf2"/>
+      <stop offset=".3" stop-color="#f7d76b"/>
+      <stop offset=".64" stop-color="#b77a0e"/>
+      <stop offset="1" stop-color="#5a3206"/>
+    </radialGradient>
+    <radialGradient id="puck" cx=".32" cy=".28" r=".76">
+      <stop offset="0" stop-color="#fff7cb"/>
+      <stop offset=".32" stop-color="#ff9b28"/>
+      <stop offset=".72" stop-color="#f03012"/>
+      <stop offset="1" stop-color="#8b1000"/>
+    </radialGradient>
+  </defs>
+  <rect x="5" y="3" width="54" height="58" rx="11" fill="#d7dde4"/>
+  <rect x="9" y="7" width="46" height="50" rx="8" fill="url(#table)"/>
+  <path d="M9 32h46M20 7a12 12 0 0 0 24 0M20 57a12 12 0 0 1 24 0" fill="none" stroke="#fff" stroke-width="2.4" opacity=".82"/>
+  <circle cx="22" cy="43" r="10" fill="url(#mallet)" stroke="#5a3206" stroke-width="1.2"/>
+  <circle cx="42" cy="20" r="10" fill="url(#mallet)" stroke="#5a3206" stroke-width="1.2"/>
+  <circle cx="35" cy="34" r="5" fill="url(#puck)" stroke="#8b1000" stroke-width="1"/>
+</svg>
