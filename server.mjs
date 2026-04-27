@@ -33,6 +33,9 @@ const PUCK_MIN_LIVE_SPEED = 120;
 const WALL_RESTITUTION = 0.94;
 const PUCK_RESTITUTION = 0.85;
 const MALLET_RESTITUTION = 0.80;
+const MALLET_STRIKE_TRANSFER = 0.62;
+const MALLET_HIT_COOLDOWN_MS = 44;
+const CONTACT_SEPARATION = 0.75;
 const PUCK_SUBSTEPS = 16;
 const FRICTION_PER_SECOND = 0.991;
 const STUCK_SPEED = 95;
@@ -717,9 +720,9 @@ function stepPucks(room, dt) {
     puck.y += puck.vy * dt;
 
     collidePuckWithWalls(room, puck);
-    const hitA = collidePuckWithMallet(room, puck, state.mallets[0]);
+    const hitA = collidePuckWithMallet(room, puck, state.mallets[0], 0, dt);
     if (hitA) emitFx(room, "hit", false, hitA);
-    const hitB = collidePuckWithMallet(room, puck, state.mallets[1]);
+    const hitB = collidePuckWithMallet(room, puck, state.mallets[1], 1, dt);
     if (hitB) emitFx(room, "hit", false, hitB);
     for (const mallet of state.mallets) {
       forceSeparatePuckFromMallet(room, puck, mallet);
@@ -836,8 +839,9 @@ function forceSeparatePuckFromMallet(room, puck, mallet) {
   puck.y += ny * overlap;
 }
 
-function collidePuckWithMallet(room, puck, mallet) {
+function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   const minDistance = TABLE.puckRadius + TABLE.malletRadius;
+  const now = Date.now();
   const startX = Number.isFinite(mallet.sweepFromX) ? mallet.sweepFromX : mallet.x;
   const startY = Number.isFinite(mallet.sweepFromY) ? mallet.sweepFromY : mallet.y;
   const puckStartX = Number.isFinite(puck.prevX) ? puck.prevX : puck.x;
@@ -910,35 +914,62 @@ function collidePuckWithMallet(room, puck, mallet) {
   const nx = dx / distance;
   const ny = dy / distance;
 
-  // Push puck out of mallet with extra separation to prevent re-overlap
-  const separation = minDistance - distance + 1.5;
-  puck.x = puck.x + nx * separation;
-  puck.y = puck.y + ny * separation;
-  puck.prevX = puck.x;
-  puck.prevY = puck.y;
+  if (sweptHit) {
+    puck.x = contactX + nx * (minDistance + CONTACT_SEPARATION);
+    puck.y = contactY + ny * (minDistance + CONTACT_SEPARATION);
+  } else {
+    const separation = minDistance - distance + CONTACT_SEPARATION;
+    puck.x += nx * separation;
+    puck.y += ny * separation;
+  }
 
-  // Relative velocity along the contact normal
   const rvx = puck.vx - mallet.vx;
   const rvy = puck.vy - mallet.vy;
   const relativeNormalSpeed = rvx * nx + rvy * ny;
   const strikeSpeed = Math.max(0, mallet.vx * nx + mallet.vy * ny);
+  const repeatedContact =
+    puck.lastMalletHitIndex === malletIndex &&
+    now - (puck.lastMalletHitAt || 0) < MALLET_HIT_COOLDOWN_MS &&
+    relativeNormalSpeed > -80;
+
+  if (repeatedContact) {
+    puck.prevX = puck.x;
+    puck.prevY = puck.y;
+    return false;
+  }
 
   if (relativeNormalSpeed < 0) {
-    // Approaching: apply elastic impulse (mallet = infinite mass)
     const impulse = -(1 + MALLET_RESTITUTION) * relativeNormalSpeed;
     puck.vx += nx * impulse;
     puck.vy += ny * impulse;
-  } else if (strikeSpeed > 100) {
-    // Overlapping but mallet is actively pushing: gentle nudge
-    const nudge = strikeSpeed * 0.6;
-    puck.vx += nx * nudge;
-    puck.vy += ny * nudge;
   }
+
+  if (strikeSpeed > 120) {
+    const puckNormalSpeed = puck.vx * nx + puck.vy * ny;
+    const targetNormalSpeed = Math.max(PUCK_MIN_LIVE_SPEED, strikeSpeed * MALLET_STRIKE_TRANSFER);
+    if (puckNormalSpeed < targetNormalSpeed) {
+      const carry = targetNormalSpeed - puckNormalSpeed;
+      puck.vx += nx * carry;
+      puck.vy += ny * carry;
+    }
+  }
+
+  capPuckSpeed(puck);
+
+  if (sweptHit && hitT < 1) {
+    const remaining = dt * (1 - hitT);
+    puck.x += puck.vx * remaining;
+    puck.y += puck.vy * remaining;
+  }
+
+  puck.prevX = puck.x;
+  puck.prevY = puck.y;
+  puck.lastMalletHitIndex = malletIndex;
+  puck.lastMalletHitAt = now;
 
   const impactSpeed = Math.max(0, -relativeNormalSpeed);
   const intensity = clamp((impactSpeed + strikeSpeed * 0.34) / 3500, 0.14, 0.86);
 
-  capPuckSpeed(puck);
   room.updatedAt = Date.now();
   return intensity;
 }

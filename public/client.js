@@ -234,6 +234,7 @@ let canvasMetrics = null;
 let currentCursor = "";
 const predictedMallets = new Map();
 const LOCAL_PREDICTION_WINDOW_MS = 90;
+const LOCAL_CONTACT_SEPARATION = 0.75;
 
 applyLanguage();
 connect();
@@ -709,7 +710,7 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
   const malletRadius = TABLE.malletRadius;
   const puckRadius = TABLE.puckRadius;
   const minDistance = malletRadius + puckRadius;
-  const contactSkin = 1.5;
+  const contactSkin = 0.75;
   const sweepX = toX - fromX;
   const sweepY = toY - fromY;
   const malletSpeed = Math.hypot(sweepX, sweepY) * 120;
@@ -720,35 +721,8 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
     const finalDistance = Math.hypot(puck.x - toX, puck.y - toY);
     if (finalDistance > minDistance + contactSkin) continue;
 
-    const relativeStartX = puck.x - fromX;
-    const relativeStartY = puck.y - fromY;
-    const a = sweepX * sweepX + sweepY * sweepY;
-    const b = -2 * (relativeStartX * sweepX + relativeStartY * sweepY);
-    const c = relativeStartX * relativeStartX + relativeStartY * relativeStartY - minDistance * minDistance;
-    let hitT = null;
-
-    if (c <= 0) {
-      hitT = 0;
-    } else if (a > 0.000001) {
-      const discriminant = b * b - 4 * a * c;
-      if (discriminant >= 0) {
-        const root = Math.sqrt(discriminant);
-        const t0 = (-b - root) / (2 * a);
-        const t1 = (-b + root) / (2 * a);
-        if (t0 >= 0 && t0 <= 1) {
-          hitT = t0;
-        } else if (t1 >= 0 && t1 <= 1) {
-          hitT = t1;
-        }
-      }
-    }
-
-    if (hitT === null) continue;
-
-    const contactMalletX = fromX + sweepX * hitT;
-    const contactMalletY = fromY + sweepY * hitT;
-    let normalX = puck.x - contactMalletX;
-    let normalY = puck.y - contactMalletY;
+    let normalX = puck.x - toX;
+    let normalY = puck.y - toY;
     let normalLength = Math.hypot(normalX, normalY);
     if (normalLength <= 0.001) {
       normalX = sweepX || 1;
@@ -758,12 +732,14 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
     normalX /= normalLength;
     normalY /= normalLength;
 
-    puck.x = contactMalletX + normalX * (minDistance + 0.5);
-    puck.y = contactMalletY + normalY * (minDistance + 0.5);
+    puck.x = toX + normalX * (minDistance + LOCAL_CONTACT_SEPARATION);
+    puck.y = toY + normalY * (minDistance + LOCAL_CONTACT_SEPARATION);
 
     const strike = Math.min(820, 180 + malletSpeed * 0.12);
     puck.vx = normalX * strike + sweepX * 9.5;
     puck.vy = normalY * strike + sweepY * 9.5;
+    puck.x += puck.vx * 0.014;
+    puck.y += puck.vy * 0.014;
     puck.localPredictedAt = now;
     puck.localPredictionExpiresAt = now + LOCAL_PREDICTION_WINDOW_MS;
     playFx("hit", Math.min(1, strike / 900));
