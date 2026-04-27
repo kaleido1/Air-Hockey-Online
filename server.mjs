@@ -34,8 +34,9 @@ const WALL_RESTITUTION = 0.94;
 const PUCK_RESTITUTION = 0.85;
 const MALLET_RESTITUTION = 0.80;
 const MALLET_STRIKE_TRANSFER = 0.62;
-const MALLET_HIT_COOLDOWN_MS = 44;
+const MALLET_HIT_COOLDOWN_MS = 28;
 const CONTACT_SEPARATION = 0.75;
+const CONTACT_SLOP = 1.25;
 const PUCK_SUBSTEPS = 16;
 const FRICTION_PER_SECOND = 0.991;
 const STUCK_SPEED = 95;
@@ -120,6 +121,7 @@ server.on("upgrade", (req, socket) => {
     buffer: Buffer.alloc(0),
     roomCode: null,
     playerIndex: null,
+    networkKey: getClientNetworkKey(req),
     queued: false,
     lastPongAt: Date.now()
   };
@@ -255,8 +257,7 @@ function handleMessage(client, message) {
       leaveRoom(client, false);
       break;
     case "leaveToMenu":
-      leaveRoom(client, false);
-      send(client, { type: "left" });
+      leaveToMenu(client);
       break;
     case "ping":
       send(client, { type: "pong", at: message.at || Date.now() });
@@ -336,7 +337,10 @@ function joinLanRoom(client, puckCount) {
   removeFromQueue(client);
 
   const reconnectRoom = findLanReconnectRoom(client);
-  const room = reconnectRoom || findOpenLanRoom(puckCount) || makeRoom({ puckCount, lan: true });
+  const room =
+    reconnectRoom ||
+    findOpenLanRoom(puckCount, client.networkKey) ||
+    makeRoom({ puckCount, lan: true, lanNetworkKey: client.networkKey });
 
   const reconnectSlot = room.players.findIndex(
     (player) =>
@@ -352,6 +356,7 @@ function joinLanRoom(client, puckCount) {
 function findLanReconnectRoom(client) {
   for (const room of rooms.values()) {
     if (!room.settings.lan) continue;
+    if (room.lanNetworkKey && room.lanNetworkKey !== client.networkKey) continue;
     const slot = room.players.findIndex(
       (player) =>
         player &&
@@ -363,10 +368,11 @@ function findLanReconnectRoom(client) {
   return null;
 }
 
-function findOpenLanRoom(puckCount) {
+function findOpenLanRoom(puckCount, networkKey) {
   let oldestRoom = null;
   for (const room of rooms.values()) {
     if (!room.settings.lan) continue;
+    if (room.lanNetworkKey && room.lanNetworkKey !== networkKey) continue;
     if (room.state.phase !== "waiting") continue;
     if (room.settings.puckCount !== puckCount) continue;
     const humans = room.players.filter((player) => player && !player.bot);
@@ -464,6 +470,7 @@ function makeRoom(options = {}) {
   const room = {
     code,
     players: [null, null],
+    lanNetworkKey: options.lanNetworkKey || null,
     settings: {
       puckCount: normalizePuckCount(options.puckCount),
       firstTo: TABLE.firstTo,
@@ -524,6 +531,29 @@ function togglePause(client) {
     room.updatedAt = Date.now();
     broadcastRoom(room, { type: "resumed" });
   }
+}
+
+function leaveToMenu(client) {
+  const room = currentRoom(client);
+  if (room?.state.phase === "gameover") {
+    closeFinishedRoom(room);
+    return;
+  }
+
+  leaveRoom(client, false);
+  send(client, { type: "left" });
+}
+
+function closeFinishedRoom(room) {
+  for (const player of room.players) {
+    if (!player || player.bot) continue;
+    const client = clients.get(player.id);
+    if (!client) continue;
+    client.roomCode = null;
+    client.playerIndex = null;
+    send(client, { type: "left" });
+  }
+  rooms.delete(room.code);
 }
 
 function leaveRoom(client, notify = true) {
@@ -841,6 +871,7 @@ function forceSeparatePuckFromMallet(room, puck, mallet) {
 
 function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   const minDistance = TABLE.puckRadius + TABLE.malletRadius;
+  const collisionDistance = minDistance + CONTACT_SLOP;
   const now = Date.now();
   const startX = Number.isFinite(mallet.sweepFromX) ? mallet.sweepFromX : mallet.x;
   const startY = Number.isFinite(mallet.sweepFromY) ? mallet.sweepFromY : mallet.y;
@@ -852,6 +883,7 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   const puckDeltaY = puck.y - puckStartY;
   const relativeStartX = puckStartX - startX;
   const relativeStartY = puckStartY - startY;
+  const relativeStartDistance = Math.hypot(relativeStartX, relativeStartY);
   const relativeDeltaX = puckDeltaX - sweepX;
   const relativeDeltaY = puckDeltaY - sweepY;
   let hitT = 1;
@@ -864,16 +896,16 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   let distance = Math.hypot(dx, dy);
   let sweptHit = false;
 
-  if (distance >= minDistance) {
+  if (relativeStartDistance > minDistance + 0.001) {
     const a = relativeDeltaX * relativeDeltaX + relativeDeltaY * relativeDeltaY;
     const b = 2 * (relativeStartX * relativeDeltaX + relativeStartY * relativeDeltaY);
-    const c = relativeStartX * relativeStartX + relativeStartY * relativeStartY - minDistance * minDistance;
+    const c =
+      relativeStartX * relativeStartX +
+      relativeStartY * relativeStartY -
+      collisionDistance * collisionDistance;
 
     let hit = false;
-    if (c <= 0) {
-      hit = true;
-      hitT = 0;
-    } else if (a > 0.000001) {
+    if (a > 0.000001) {
       const discriminant = b * b - 4 * a * c;
       if (discriminant >= 0) {
         const root = Math.sqrt(discriminant);
@@ -896,9 +928,19 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
       dy = probeY - contactY;
       distance = Math.hypot(dx, dy);
     }
+  } else if (relativeStartDistance <= minDistance && distance < collisionDistance) {
+    sweptHit = true;
+    hitT = 0;
+    probeX = puckStartX;
+    probeY = puckStartY;
+    contactX = startX;
+    contactY = startY;
+    dx = probeX - contactX;
+    dy = probeY - contactY;
+    distance = Math.hypot(dx, dy);
   }
 
-  if (!sweptHit && distance >= minDistance) return false;
+  if (!sweptHit && distance >= collisionDistance) return false;
 
   if (distance <= 0.001) {
     dx = puck.x - mallet.x;
@@ -919,20 +961,35 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
     puck.y = contactY + ny * (minDistance + CONTACT_SEPARATION);
   } else {
     const separation = minDistance - distance + CONTACT_SEPARATION;
-    puck.x += nx * separation;
-    puck.y += ny * separation;
+    if (separation > 0) {
+      puck.x += nx * separation;
+      puck.y += ny * separation;
+    }
   }
 
   const rvx = puck.vx - mallet.vx;
   const rvy = puck.vy - mallet.vy;
   const relativeNormalSpeed = rvx * nx + rvy * ny;
   const strikeSpeed = Math.max(0, mallet.vx * nx + mallet.vy * ny);
+  if (!sweptHit && distance > minDistance && (strikeSpeed < 260 || relativeNormalSpeed > -90)) {
+    return false;
+  }
   const repeatedContact =
     puck.lastMalletHitIndex === malletIndex &&
     now - (puck.lastMalletHitAt || 0) < MALLET_HIT_COOLDOWN_MS &&
     relativeNormalSpeed > -80;
 
   if (repeatedContact) {
+    if (distance < minDistance + CONTACT_SEPARATION && strikeSpeed > 80) {
+      const puckNormalSpeed = puck.vx * nx + puck.vy * ny;
+      const escapeSpeed = Math.max(PUCK_MIN_LIVE_SPEED, strikeSpeed * 0.28);
+      if (puckNormalSpeed < escapeSpeed) {
+        const escape = escapeSpeed - puckNormalSpeed;
+        puck.vx += nx * escape;
+        puck.vy += ny * escape;
+        capPuckSpeed(puck);
+      }
+    }
     puck.prevX = puck.x;
     puck.prevY = puck.y;
     return false;
@@ -972,6 +1029,27 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
 
   room.updatedAt = Date.now();
   return intensity;
+}
+
+function getClientNetworkKey(req) {
+  const forwardedFor = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  const rawAddress = forwardedFor || req.socket.remoteAddress || "unknown";
+  const address = rawAddress.startsWith("::ffff:") ? rawAddress.slice(7) : rawAddress;
+
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(address)) {
+    const parts = address.split(".");
+    const isPrivate =
+      parts[0] === "10" ||
+      (parts[0] === "172" && Number(parts[1]) >= 16 && Number(parts[1]) <= 31) ||
+      (parts[0] === "192" && parts[1] === "168");
+    return isPrivate ? `${parts[0]}.${parts[1]}.${parts[2]}.0/24` : address;
+  }
+
+  if (address.includes(":")) {
+    return `${address.split(":").slice(0, 4).join(":")}::/64`;
+  }
+
+  return address;
 }
 
 function collidePucks(a, b) {

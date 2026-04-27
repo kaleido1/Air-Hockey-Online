@@ -198,6 +198,7 @@ let playerIndex = null;
 let puckCount = 1;
 let roomCode = "";
 let roomSettings = null;
+let roomMinimized = false;
 let serverState = null;
 let previousState = null;
 let roomPlayers = null;
@@ -271,7 +272,7 @@ els.joinForm.addEventListener("submit", (event) => {
   if (code) send({ type: "join", code });
 });
 els.copyButton.addEventListener("click", async () => {
-  if (!roomCode || !roomSettings?.lan) return;
+  if (!shouldExposeRoomInUrl()) return;
   const url = new URL(location.href);
   url.searchParams.set("room", roomCode);
   try {
@@ -409,6 +410,7 @@ function handleMessage(message) {
       roomCode = message.code;
       playerIndex = message.playerIndex;
       roomSettings = message.settings;
+      roomMinimized = false;
       puckCount = message.settings.puckCount;
       setPuckCount(puckCount, false);
       setStatus(playerIndex === 0 ? "waitingOpponent" : "getReady");
@@ -422,6 +424,7 @@ function handleMessage(message) {
       if (message.players?.[1]?.bot) setStatus("practice");
       break;
     case "started":
+      roomMinimized = false;
       showUi(null);
       setStatus("getReady");
       break;
@@ -444,11 +447,12 @@ function handleMessage(message) {
         }
       }
       updateScoreboard(message);
-      updatePhaseText();
+      if (!(roomMinimized && message.state.phase === "waiting")) updatePhaseText();
       updateTrails();
       if (["playing", "countdown", "point", "gameover", "paused"].includes(message.state.phase)) {
+        roomMinimized = false;
         showUi(null);
-      } else if (message.state.phase === "waiting" && roomCode) {
+      } else if (message.state.phase === "waiting" && roomCode && !roomMinimized) {
         showUi("waiting");
       }
       break;
@@ -603,12 +607,12 @@ function updateRoomLabels(message = {}) {
   els.roomCode.textContent = code;
   els.roomPill.textContent = roomCode ? code : t("offline");
   els.roomInput.value = roomCode ? roomCode : els.roomInput.value;
-  if (roomCode && roomSettings?.lan) {
+  if (shouldExposeRoomInUrl()) {
     const url = new URL(location.href);
     url.searchParams.set("room", roomCode);
     history.replaceState(null, "", url);
-  } else if (!roomSettings?.lan && location.search) {
-    history.replaceState(null, "", location.pathname);
+  } else {
+    clearRoomUrl();
   }
   setButtons();
 }
@@ -648,7 +652,7 @@ function setButtons() {
   els.quickButton.disabled = !connected;
   els.createButton.disabled = !connected;
   els.botButton.disabled = !connected;
-  els.copyButton.disabled = !inRoom;
+  els.copyButton.disabled = !shouldExposeRoomInUrl();
   els.restartButton.disabled = !inRoom || playerIndex !== 0;
   els.leaveButton.disabled = !inRoom;
 }
@@ -662,6 +666,7 @@ function clearRoom() {
   playerIndex = null;
   roomCode = "";
   roomSettings = null;
+  roomMinimized = false;
   serverState = null;
   previousState = null;
   roomPlayers = null;
@@ -710,7 +715,8 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
   const malletRadius = TABLE.malletRadius;
   const puckRadius = TABLE.puckRadius;
   const minDistance = malletRadius + puckRadius;
-  const contactSkin = 0.75;
+  const contactSkin = 1.25;
+  const collisionDistance = minDistance + contactSkin;
   const sweepX = toX - fromX;
   const sweepY = toY - fromY;
   const malletSpeed = Math.hypot(sweepX, sweepY) * 120;
@@ -719,10 +725,37 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
   for (const puck of serverState.pucks) {
     if (puck.localPredictedAt && now - puck.localPredictedAt < 22) continue;
     const finalDistance = Math.hypot(puck.x - toX, puck.y - toY);
-    if (finalDistance > minDistance + contactSkin) continue;
+    const relativeStartX = puck.x - fromX;
+    const relativeStartY = puck.y - fromY;
+    const relativeStartDistance = Math.hypot(relativeStartX, relativeStartY);
+    const a = sweepX * sweepX + sweepY * sweepY;
+    const b = -2 * (relativeStartX * sweepX + relativeStartY * sweepY);
+    const c =
+      relativeStartX * relativeStartX +
+      relativeStartY * relativeStartY -
+      collisionDistance * collisionDistance;
+    let hitT = null;
 
-    let normalX = puck.x - toX;
-    let normalY = puck.y - toY;
+    if (finalDistance <= collisionDistance && malletSpeed > 260) {
+      hitT = 1;
+    } else if (relativeStartDistance <= minDistance) {
+      hitT = 0;
+    } else if (a > 0.000001) {
+      const discriminant = b * b - 4 * a * c;
+      if (discriminant >= 0) {
+        const root = Math.sqrt(discriminant);
+        const t0 = (-b - root) / (2 * a);
+        if (t0 >= 0 && t0 <= 1) hitT = t0;
+      }
+    }
+
+    if (hitT === null) continue;
+
+    const contactMalletX = fromX + sweepX * hitT;
+    const contactMalletY = fromY + sweepY * hitT;
+
+    let normalX = puck.x - contactMalletX;
+    let normalY = puck.y - contactMalletY;
     let normalLength = Math.hypot(normalX, normalY);
     if (normalLength <= 0.001) {
       normalX = sweepX || 1;
@@ -732,8 +765,8 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
     normalX /= normalLength;
     normalY /= normalLength;
 
-    puck.x = toX + normalX * (minDistance + LOCAL_CONTACT_SEPARATION);
-    puck.y = toY + normalY * (minDistance + LOCAL_CONTACT_SEPARATION);
+    puck.x = contactMalletX + normalX * (minDistance + LOCAL_CONTACT_SEPARATION);
+    puck.y = contactMalletY + normalY * (minDistance + LOCAL_CONTACT_SEPARATION);
 
     const strike = Math.min(820, 180 + malletSpeed * 0.12);
     puck.vx = normalX * strike + sweepX * 9.5;
@@ -931,6 +964,23 @@ function isOnlineRoom() {
   return Boolean(roomCode && roomSettings && !roomSettings.lan && !roomSettings.local && !roomSettings.bot);
 }
 
+function shouldExposeRoomInUrl() {
+  return Boolean(isOnlineRoom() && !roomSettings?.quick && !roomMinimized);
+}
+
+function returnToActiveOnlineRoom() {
+  if (!isOnlineRoom()) return false;
+  roomMinimized = false;
+  updateRoomLabels();
+  updatePhaseText();
+  if (serverState && ["playing", "countdown", "point", "paused", "gameover"].includes(serverState.phase)) {
+    showUi(null);
+  } else {
+    showUi("waiting");
+  }
+  return true;
+}
+
 function getWaitingHintText() {
   if (roomSettings?.lan) return t("waitingOtherPlayerJoin");
   if (isOnlineRoom()) return t("shareRoomCode");
@@ -1109,11 +1159,17 @@ function drawMainMenu(interactive) {
     },
     () => {
       unlockAudio();
+      if (roomCode) {
+        send({ type: "leaveToMenu" });
+        clearRoom();
+      }
+      clearRoomUrl();
       pendingStartMode = "lan";
       showUi("lan");
     },
     () => {
       unlockAudio();
+      if (returnToActiveOnlineRoom()) return;
       pendingStartMode = "online";
       showUi("online");
     },
@@ -1208,11 +1264,15 @@ function drawLanMenu(interactive) {
   if (interactive) {
     addButton(join, () => {
       unlockAudio();
+      clearRoomUrl();
       send({ type: "lan", puckCount });
       setStatus("waitingOtherPlayer");
       showUi("waiting");
     });
-    addButton(back, () => showUi("main"));
+    addButton(back, () => {
+      clearRoomUrl();
+      showUi("main");
+    });
   }
 }
 
@@ -1255,9 +1315,9 @@ function drawOnlineMenu(interactive) {
 
 function drawWaitingMenu(interactive) {
   const x = 82;
-  const y = isOnlineRoom() ? 344 : 378;
+  const y = isOnlineRoom() ? 314 : 378;
   const w = 426;
-  const h = isOnlineRoom() ? 300 : roomSettings?.lan ? 210 : 188;
+  const h = isOnlineRoom() ? 364 : roomSettings?.lan ? 210 : 188;
   drawBluePanel(x, y, w, h, 24);
 
   ctx.save();
@@ -1281,14 +1341,34 @@ function drawWaitingMenu(interactive) {
   }
   ctx.restore();
 
-  const back = { x: x + 26, y: y + h - 66, w: w - 52, h: 48 };
+  const back = {
+    x: x + 26,
+    y: isOnlineRoom() ? y + h - 118 : y + h - 66,
+    w: w - 52,
+    h: 48
+  };
   drawRedButton(back.x, back.y, back.w, back.h, t("backMenu"), 25);
+  const leave = { x: x + 26, y: y + h - 58, w: w - 52, h: 42 };
+  if (isOnlineRoom()) drawRedButton(leave.x, leave.y, leave.w, leave.h, t("leave"), 23);
 
   if (interactive) {
-    addButton(back, () => {
-      send({ type: "leave" });
-      clearRoom();
-    });
+    if (isOnlineRoom()) {
+      addButton(back, () => {
+        roomMinimized = true;
+        clearRoomUrl();
+        setStatus("chooseMode");
+        showUi("main");
+      });
+      addButton(leave, () => {
+        send({ type: "leaveToMenu" });
+        clearRoom();
+      });
+    } else {
+      addButton(back, () => {
+        send({ type: "leave" });
+        clearRoom();
+      });
+    }
   }
 }
 
@@ -1740,7 +1820,7 @@ function addButton(rect, action) {
 }
 
 async function copyInviteLink() {
-  if (!roomCode || !roomSettings?.lan) return;
+  if (!shouldExposeRoomInUrl()) return;
   const url = new URL(location.href);
   url.searchParams.set("room", roomCode);
   try {
