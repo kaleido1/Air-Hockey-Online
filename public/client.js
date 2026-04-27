@@ -979,7 +979,7 @@ function scheduleGameoverReturn() {
     if (serverState?.phase !== "gameover") return;
     send({ type: "leave" });
     clearRoom();
-  }, 2600);
+  }, 2200);
 }
 
 function shouldRotateWorld() {

@@ -673,16 +673,16 @@ function tickRooms() {
       }
     }
 
-    finalizeMalletSweeps(room.state);
+    // Only reset sweep if mallet is NOT under direct input control
+    for (const mallet of room.state.mallets) {
+      if (!mallet.directInputUntil || Date.now() >= mallet.directInputUntil) {
+        mallet.sweepFromX = mallet.x;
+        mallet.sweepFromY = mallet.y;
+      }
+    }
   }
 }
 
-function finalizeMalletSweeps(state) {
-  for (const mallet of state.mallets) {
-    mallet.sweepFromX = mallet.x;
-    mallet.sweepFromY = mallet.y;
-  }
-}
 
 function moveMallets(state, dt) {
   for (let index = 0; index < state.mallets.length; index += 1) {
@@ -725,6 +725,11 @@ function stepPucks(room, dt) {
 
     puck.x += puck.vx * dt;
     puck.y += puck.vy * dt;
+
+    // Static overlap safety net: force-separate puck from mallet even without sweep CCD
+    for (const mallet of state.mallets) {
+      forceSeparatePuckFromMallet(room, puck, mallet);
+    }
 
     collidePuckWithWalls(room, puck);
     const hitA = collidePuckWithMallet(room, puck, state.mallets[0]);
@@ -826,6 +831,32 @@ function rescueStuckPuck(room, puck, dt) {
   puck.stuckFor = 0;
   room.updatedAt = Date.now();
   emitFx(room, "wall", true, 0.28);
+}
+
+function forceSeparatePuckFromMallet(room, puck, mallet) {
+  const minDistance = TABLE.puckRadius + TABLE.malletRadius;
+  const dx = puck.x - mallet.x;
+  const dy = puck.y - mallet.y;
+  const distance = Math.hypot(dx, dy);
+  if (distance >= minDistance || distance <= 0.001) return;
+
+  // Puck is overlapping mallet — force it out
+  const nx = dx / distance;
+  const ny = dy / distance;
+  const overlap = minDistance - distance + 2;
+  puck.x += nx * overlap;
+  puck.y += ny * overlap;
+
+  // Give the puck a bounce impulse based on mallet velocity
+  const malletNormalSpeed = mallet.vx * nx + mallet.vy * ny;
+  const puckNormalSpeed = puck.vx * nx + puck.vy * ny;
+  const minEscape = Math.max(500, malletNormalSpeed * (1 + MALLET_RESTITUTION));
+  if (puckNormalSpeed < minEscape) {
+    puck.vx += nx * (minEscape - puckNormalSpeed);
+    puck.vy += ny * (minEscape - puckNormalSpeed);
+  }
+  capPuckSpeed(puck);
+  emitFx(room, "hit", true, 0.4);
 }
 
 function collidePuckWithMallet(room, puck, mallet) {
