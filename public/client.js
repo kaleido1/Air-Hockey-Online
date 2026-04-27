@@ -3,6 +3,14 @@ let ctx =
   canvas.getContext("2d", { alpha: false, desynchronized: true }) ||
   canvas.getContext("2d");
 
+const restartImg = new Image();
+restartImg.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-30 -30 60 60" width="60" height="60">
+  <path d="M 18.13 -3.67 A 18.5 18.5 0 1 0 4.14 -18.02" fill="none" stroke="blue" stroke-width="6.5" stroke-linecap="round" />
+  <polygon points="16.8,-18.8 32.5,-12.6 20.5,-0.2" fill="blue" />
+</svg>
+`);
+
 const els = {
   youScore: document.querySelector("#youScore"),
   opponentScore: document.querySelector("#opponentScore"),
@@ -233,6 +241,7 @@ let puckSprite = null;
 let canvasMetrics = null;
 let currentCursor = "";
 const predictedMallets = new Map();
+const LOCAL_PREDICTION_WINDOW_MS = 90;
 
 applyLanguage();
 connect();
@@ -687,6 +696,9 @@ function sendPointer(event, force, overridePlayerIndex = null) {
   if (!force && now - lastInputAtByPlayer[targetIndex] < 1000 / 120) return;
   lastInputAtByPlayer[targetIndex] = now;
   const constrained = constrainForPlayer(targetIndex, point.x, point.y);
+  const previousPredicted = predictedMallets.get(targetIndex);
+  const fromX = previousPredicted?.x ?? serverState?.mallets?.[targetIndex]?.x ?? constrained.x;
+  const fromY = previousPredicted?.y ?? serverState?.mallets?.[targetIndex]?.y ?? constrained.y;
   if (serverState?.mallets?.[targetIndex]) {
     serverState.mallets[targetIndex].x = constrained.x;
     serverState.mallets[targetIndex].y = constrained.y;
@@ -696,7 +708,70 @@ function sendPointer(event, force, overridePlayerIndex = null) {
     y: constrained.y,
     expiresAt: performance.now() + 180
   });
+  applyLocalStrikePrediction(targetIndex, fromX, fromY, constrained.x, constrained.y, now);
   send({ type: "input", x: constrained.x, y: constrained.y, playerIndex: targetIndex });
+}
+
+function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
+  if (!serverState?.pucks?.length) return;
+  const malletRadius = TABLE.malletRadius;
+  const puckRadius = TABLE.puckRadius;
+  const minDistance = malletRadius + puckRadius;
+  const sweepX = toX - fromX;
+  const sweepY = toY - fromY;
+  const malletSpeed = Math.hypot(sweepX, sweepY) * 120;
+  if (Math.abs(sweepX) < 0.001 && Math.abs(sweepY) < 0.001) return;
+
+  for (const puck of serverState.pucks) {
+    if (puck.localPredictedAt && now - puck.localPredictedAt < 22) continue;
+    const relativeStartX = puck.x - fromX;
+    const relativeStartY = puck.y - fromY;
+    const a = sweepX * sweepX + sweepY * sweepY;
+    const b = -2 * (relativeStartX * sweepX + relativeStartY * sweepY);
+    const c = relativeStartX * relativeStartX + relativeStartY * relativeStartY - minDistance * minDistance;
+    let hitT = null;
+
+    if (c <= 0) {
+      hitT = 0;
+    } else if (a > 0.000001) {
+      const discriminant = b * b - 4 * a * c;
+      if (discriminant >= 0) {
+        const root = Math.sqrt(discriminant);
+        const t0 = (-b - root) / (2 * a);
+        const t1 = (-b + root) / (2 * a);
+        if (t0 >= 0 && t0 <= 1) {
+          hitT = t0;
+        } else if (t1 >= 0 && t1 <= 1) {
+          hitT = t1;
+        }
+      }
+    }
+
+    if (hitT === null) continue;
+
+    const contactMalletX = fromX + sweepX * hitT;
+    const contactMalletY = fromY + sweepY * hitT;
+    let normalX = puck.x - contactMalletX;
+    let normalY = puck.y - contactMalletY;
+    let normalLength = Math.hypot(normalX, normalY);
+    if (normalLength <= 0.001) {
+      normalX = sweepX || 1;
+      normalY = sweepY || 0;
+      normalLength = Math.hypot(normalX, normalY) || 1;
+    }
+    normalX /= normalLength;
+    normalY /= normalLength;
+
+    puck.x = contactMalletX + normalX * (minDistance + 0.5);
+    puck.y = contactMalletY + normalY * (minDistance + 0.5);
+
+    const strike = Math.min(820, 180 + malletSpeed * 0.12);
+    puck.vx = normalX * strike + sweepX * 9.5;
+    puck.vy = normalY * strike + sweepY * 9.5;
+    puck.localPredictedAt = now;
+    puck.localPredictionExpiresAt = now + LOCAL_PREDICTION_WINDOW_MS;
+    playFx("hit", Math.min(1, strike / 900));
+  }
 }
 
 function eventToTable(event) {
@@ -1462,27 +1537,7 @@ function drawRestartBubble() {
   ctx.fillText(t("resetGame"), TABLE.width / 2, 108);
   ctx.translate(TABLE.width / 2, 182);
   ctx.shadowBlur = 0;
-  ctx.strokeStyle = "#2d61bb";
-  ctx.lineWidth = 7.5;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.beginPath();
-  ctx.arc(0, 0, 21, -0.4, Math.PI * 1.72, true);
-  ctx.stroke();
-
-  ctx.strokeStyle = "rgba(255,255,255,0.96)";
-  ctx.lineWidth = 2.1;
-  ctx.beginPath();
-  ctx.arc(0, 0, 20.2, -0.34, Math.PI * 1.64, true);
-  ctx.stroke();
-
-  ctx.fillStyle = "#2d61bb";
-  ctx.beginPath();
-  ctx.moveTo(14.5, -24.5);
-  ctx.lineTo(33, -22.2);
-  ctx.lineTo(22.8, -6.5);
-  ctx.closePath();
-  ctx.fill();
+  ctx.drawImage(restartImg, -30, -30, 60, 60);
   ctx.restore();
 }
 
