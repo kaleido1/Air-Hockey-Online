@@ -331,8 +331,10 @@ canvas.addEventListener("pointerdown", (event) => {
   }
   if (isLocalGame() && point) {
     const localIndex = event.pointerType === "touch" ? (point.y < TABLE.height / 2 ? 1 : 0) : localPointerMalletIndex;
-    if (event.pointerType === "touch") activePointers.set(event.pointerId, localIndex);
-    sendPointer(event, true, localIndex);
+    if (event.pointerType === "touch") {
+      activePointers.set(event.pointerId, localIndex);
+      sendPointer(event, true, localIndex);
+    }
   } else {
     sendPointer(event, true);
   }
@@ -345,7 +347,7 @@ canvas.addEventListener("pointermove", (event) => {
       const localIndex = activePointers.get(event.pointerId);
       if (localIndex === 0 || localIndex === 1) sendPointer(event, false, localIndex);
     } else {
-      sendPointer(event, false, localPointerMalletIndex);
+      sendRelativePointer(event, false, localPointerMalletIndex);
     }
   } else {
     sendPointer(event, false);
@@ -355,9 +357,7 @@ canvas.addEventListener("pointermove", (event) => {
 canvas.addEventListener("pointerup", (event) => {
   pointerDown = false;
   if (isActivePlay()) {
-    if (isLocalGame() && event.pointerType !== "touch") {
-      sendPointer(event, true, localPointerMalletIndex);
-    } else {
+    if (!(isLocalGame() && event.pointerType !== "touch")) {
       const localIndex = activePointers.get(event.pointerId);
       sendPointer(event, true, localIndex);
     }
@@ -764,10 +764,36 @@ function clearRoom() {
 function sendPointer(event, force, overridePlayerIndex = null) {
   if (!isActivePlay()) return;
   if (!roomCode || playerIndex === null) return;
-  const now = performance.now();
   const point = eventToTable(event);
   if (!point) return;
   const targetIndex = overridePlayerIndex === 0 || overridePlayerIndex === 1 ? overridePlayerIndex : playerIndex;
+  sendPointerFromPoint(point, force, targetIndex);
+}
+
+function sendRelativePointer(event, force, targetIndex) {
+  if (!isActivePlay()) return;
+  if (!roomCode || playerIndex === null) return;
+  if (!event.movementX && !event.movementY && !force) return;
+  const base =
+    predictedMallets.get(targetIndex) ||
+    serverState?.mallets?.[targetIndex] || {
+      x: TABLE.width / 2,
+      y: targetIndex === 0 ? TABLE.height * 0.78 : TABLE.height * 0.22
+    };
+  const metrics = canvasMetrics || measureCanvas();
+  const deltaX = (event.movementX / metrics.width) * TABLE.width;
+  const deltaY = (event.movementY / metrics.height) * TABLE.height;
+  const syntheticPoint = {
+    x: base.x + deltaX,
+    y: base.y + deltaY
+  };
+  sendPointerFromPoint(syntheticPoint, force, targetIndex);
+}
+
+function sendPointerFromPoint(point, force, targetIndex) {
+  if (!isActivePlay()) return;
+  if (!roomCode || playerIndex === null) return;
+  const now = performance.now();
   const inputIntervalMs = 1000 / clamp(displayRefreshHz * 1.15, 120, 240);
   if (!force && now - lastInputAtByPlayer[targetIndex] < inputIntervalMs) return;
   lastInputAtByPlayer[targetIndex] = now;
