@@ -217,7 +217,6 @@ let statusRaw = "chooseMode";
 let statusText = t("chooseMode");
 const playerKey = getPlayerKey();
 
-const trails = new Map();
 let uiScreen = pendingRoomFromUrl ? "waiting" : "main";
 let previousUiScreen = null;
 let uiTransitionStartedAt = performance.now();
@@ -682,7 +681,6 @@ function clearRoom() {
   stateSnapshots.length = 0;
   roomPlayers = null;
   predictedMallets.clear();
-  trails.clear();
   els.roomCode.textContent = "-";
   els.roomPill.textContent = t("offline");
   els.youLabel.textContent = t("you");
@@ -2125,10 +2123,8 @@ function drawGoalSlot(y, outer) {
 }
 
 function drawState(state) {
-  updateTrails(state);
   ctx.save();
   for (let index = 0; index < (state.pucks || []).length; index += 1) {
-    drawTrail(state.pucks[index]);
     drawPuck(state.pucks[index], index);
   }
 
@@ -2180,60 +2176,6 @@ function drawScoreNumber(score, x, y) {
   ctx.fillStyle = "rgba(255,255,255,0.98)";
   ctx.fillText(String(score), 0, 0);
   ctx.restore();
-}
-
-function drawTrail(puck) {
-  const points = trails.get(puck.id) || [];
-  if (points.length < 2) return;
-
-  const first = points[0];
-  const last = points[points.length - 1];
-  const dx = last.x - first.x;
-  const dy = last.y - first.y;
-  const length = Math.hypot(dx, dy);
-  if (length < 8) return;
-
-  ctx.save();
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-
-  const gradient = ctx.createLinearGradient(first.x, first.y, last.x, last.y);
-  gradient.addColorStop(0, "rgba(255, 214, 92, 0)");
-  gradient.addColorStop(0.28, "rgba(255, 214, 92, 0.18)");
-  gradient.addColorStop(0.72, "rgba(255, 236, 170, 0.42)");
-  gradient.addColorStop(1, "rgba(255, 250, 218, 0.86)");
-
-  traceTrailPath(points);
-  ctx.strokeStyle = gradient;
-  ctx.lineWidth = TABLE.puckRadius * 0.92;
-  ctx.globalAlpha = 0.78;
-  ctx.shadowColor = "rgba(255, 222, 120, 0.34)";
-  ctx.shadowBlur = 16;
-  ctx.stroke();
-
-  traceTrailPath(points);
-  ctx.strokeStyle = "rgba(255, 248, 225, 0.72)";
-  ctx.lineWidth = TABLE.puckRadius * 0.34;
-  ctx.globalAlpha = 0.92;
-  ctx.shadowBlur = 0;
-  ctx.stroke();
-
-  ctx.restore();
-}
-
-function traceTrailPath(points) {
-  ctx.beginPath();
-  ctx.moveTo(points[0].x, points[0].y);
-  for (let index = 1; index < points.length - 1; index += 1) {
-    const current = points[index];
-    const next = points[index + 1];
-    const midX = (current.x + next.x) / 2;
-    const midY = (current.y + next.y) / 2;
-    ctx.quadraticCurveTo(current.x, current.y, midX, midY);
-  }
-  const penultimate = points[points.length - 2];
-  const last = points[points.length - 1];
-  ctx.quadraticCurveTo(penultimate.x, penultimate.y, last.x, last.y);
 }
 
 function drawMallet(mallet) {
@@ -2372,27 +2314,6 @@ function drawPuckRaw(puck) {
   ctx.stroke();
 
   ctx.restore();
-}
-
-function updateTrails(state) {
-  const activeIds = new Set();
-  for (const puck of state?.pucks || []) {
-    activeIds.add(puck.id);
-    const points = trails.get(puck.id) || [];
-    const last = points[points.length - 1];
-    if (!last || Math.hypot(puck.x - last.x, puck.y - last.y) > 4) {
-      points.push({ x: puck.x, y: puck.y });
-    } else {
-      last.x = puck.x;
-      last.y = puck.y;
-    }
-    while (points.length > 14) points.shift();
-    trails.set(puck.id, points);
-  }
-
-  for (const id of Array.from(trails.keys())) {
-    if (!activeIds.has(id)) trails.delete(id);
-  }
 }
 
 function demoState() {

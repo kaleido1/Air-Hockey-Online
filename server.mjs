@@ -1036,7 +1036,7 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
     puck.x = anchorX + exitX * (minDistance + CONTACT_SEPARATION);
     puck.y = anchorY + exitY * (minDistance + CONTACT_SEPARATION);
   }
-  if (!sweptHit && distance > minDistance && (strikeSpeed < 260 || relativeNormalSpeed > -90)) {
+  if (!sweptHit && distance > minDistance && relativeNormalSpeed >= -15) {
     return false;
   }
   const repeatedContact =
