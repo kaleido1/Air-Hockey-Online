@@ -240,6 +240,10 @@ resizeCanvas();
 requestAnimationFrame(render);
 
 window.addEventListener("resize", resizeCanvas);
+window.addEventListener("pointerdown", unlockAudio, { capture: true, passive: true });
+window.addEventListener("touchstart", unlockAudio, { capture: true, passive: true });
+window.addEventListener("mousedown", unlockAudio, { capture: true, passive: true });
+window.addEventListener("keydown", unlockAudio, { capture: true });
 
 els.onePuckButton.addEventListener("click", () => setPuckCount(1));
 els.twoPuckButton.addEventListener("click", () => setPuckCount(2));
@@ -1454,31 +1458,43 @@ function drawRestartBubble() {
   ctx.shadowBlur = 6;
   ctx.fillText(t("resetGame"), TABLE.width / 2, 108);
   ctx.translate(TABLE.width / 2, 182);
-  const ring = ctx.createRadialGradient(-8, -10, 4, 0, 0, 34);
-  ring.addColorStop(0, "#ffffff");
-  ring.addColorStop(0.34, "#dce8ff");
-  ring.addColorStop(0.7, "#72a3f0");
-  ring.addColorStop(1, "#2d60b5");
-  ctx.fillStyle = ring;
-  ctx.beginPath();
-  ctx.arc(0, 0, 34, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.lineWidth = 3.5;
-  ctx.strokeStyle = "rgba(255,255,255,0.9)";
-  ctx.stroke();
   ctx.shadowBlur = 0;
-  ctx.strokeStyle = "#2f63bd";
-  ctx.lineWidth = 6.5;
+  const halo = ctx.createRadialGradient(0, 0, 4, 0, 0, 41);
+  halo.addColorStop(0, "rgba(255,255,255,0.2)");
+  halo.addColorStop(0.72, "rgba(112,162,255,0.22)");
+  halo.addColorStop(1, "rgba(112,162,255,0)");
+  ctx.fillStyle = halo;
+  ctx.beginPath();
+  ctx.arc(0, 0, 41, 0, Math.PI * 2);
+  ctx.fill();
+
+  const disc = ctx.createRadialGradient(-9, -11, 4, 0, 0, 31);
+  disc.addColorStop(0, "#ffffff");
+  disc.addColorStop(0.3, "#e4efff");
+  disc.addColorStop(0.66, "#90b8ff");
+  disc.addColorStop(1, "#4e7fd8");
+  ctx.fillStyle = disc;
+  ctx.beginPath();
+  ctx.arc(0, 0, 30, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.lineWidth = 2.6;
+  ctx.strokeStyle = "rgba(255,255,255,0.94)";
+  ctx.stroke();
+
+  ctx.strokeStyle = "#2d61bb";
+  ctx.lineWidth = 5.8;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.beginPath();
-  ctx.arc(0, 0, 18, -0.12, Math.PI * 1.45);
+  ctx.arc(0, 0, 15.5, -0.24, Math.PI * 1.48);
   ctx.stroke();
-  ctx.fillStyle = "#2f63bd";
+
+  ctx.fillStyle = "#2d61bb";
   ctx.beginPath();
-  ctx.moveTo(-18, -18);
-  ctx.lineTo(-1, -27);
-  ctx.lineTo(-5, -9);
+  ctx.moveTo(-15.5, -13.5);
+  ctx.lineTo(0.5, -20.5);
+  ctx.lineTo(-3, -4.5);
   ctx.closePath();
   ctx.fill();
   ctx.restore();
@@ -2105,7 +2121,9 @@ function unlockAudio() {
   if (!audio) {
     audio = new (window.AudioContext || window.webkitAudioContext)();
   }
-  if (audio.state === "suspended") audio.resume();
+  if (audio.state === "suspended") {
+    void audio.resume();
+  }
   if (!audioPrimed) {
     const gain = audio.createGain();
     gain.gain.value = 0.00001;
@@ -2120,7 +2138,9 @@ function unlockAudio() {
 }
 
 function playFx(kind, intensity = 0.5) {
-  if (!audio || !soundEnabled) return;
+  if (!soundEnabled) return;
+  unlockAudio();
+  if (!audio || audio.state !== "running") return;
   const now = audio.currentTime;
   const force = clamp(Number(intensity) || 0.5, 0, 1);
 
