@@ -27,14 +27,14 @@ const MALLET_MAX_SPEED = 5200;
 const HUMAN_MALLET_MAX_SPEED = 6800;
 const BOT_MIN_SPEED = 2100;
 const BOT_MAX_SPEED = 4550;
-const PUCK_MAX_SPEED = 2300;
+const PUCK_MAX_SPEED = 3200;
 const PUCK_MIN_SERVE_SPEED = 520;
-const PUCK_MIN_LIVE_SPEED = 180;
-const WALL_RESTITUTION = 0.96;
-const PUCK_RESTITUTION = 0.87;
-const MALLET_RESTITUTION = 0.76;
-const PUCK_SUBSTEPS = 6;
-const FRICTION_PER_SECOND = 0.992;
+const PUCK_MIN_LIVE_SPEED = 120;
+const WALL_RESTITUTION = 0.92;
+const PUCK_RESTITUTION = 0.90;
+const MALLET_RESTITUTION = 0.92;
+const PUCK_SUBSTEPS = 16;
+const FRICTION_PER_SECOND = 0.988;
 const STUCK_SPEED = 95;
 const STUCK_SECONDS = 0.38;
 
@@ -866,12 +866,12 @@ function collidePuckWithMallet(room, puck, mallet) {
         const root = Math.sqrt(discriminant);
         const t0 = (-b - root) / (2 * a);
         const t1 = (-b + root) / (2 * a);
-        if (t0 >= 0 && t0 <= 1) {
+        if (t0 >= -0.05 && t0 <= 1.05) {
           hit = true;
-          hitT = t0;
-        } else if (t1 >= 0 && t1 <= 1) {
+          hitT = clamp(t0, 0, 1);
+        } else if (t1 >= -0.05 && t1 <= 1.05) {
           hit = true;
-          hitT = t1;
+          hitT = clamp(t1, 0, 1);
         }
       }
     }
@@ -890,40 +890,42 @@ function collidePuckWithMallet(room, puck, mallet) {
   if (distance >= minDistance) return false;
 
   if (distance <= 0.001) {
-    dx = probeX - contactX;
-    dy = probeY - contactY;
-    distance = Math.hypot(dx, dy) || 1;
+    dx = puck.x - mallet.x;
+    dy = puck.y - mallet.y;
+    distance = Math.hypot(dx, dy);
+    if (distance <= 0.001) {
+      dx = 0;
+      dy = -1;
+      distance = 1;
+    }
   }
 
   const nx = dx / distance;
   const ny = dy / distance;
-  puck.x = contactX + nx * (minDistance + 0.2);
-  puck.y = contactY + ny * (minDistance + 0.2);
+
+  // Push puck out of mallet with extra separation to prevent re-overlap
+  const separation = minDistance - distance + 1.5;
+  puck.x = puck.x + nx * separation;
+  puck.y = puck.y + ny * separation;
   puck.prevX = puck.x;
   puck.prevY = puck.y;
 
+  // Relative velocity along the contact normal
   const rvx = puck.vx - mallet.vx;
   const rvy = puck.vy - mallet.vy;
-  const closingSpeed = rvx * nx + rvy * ny;
-  const strikeSpeed = Math.max(0, mallet.vx * nx + mallet.vy * ny);
-  const impactSpeed = Math.max(0, -closingSpeed);
-  const intensity = clamp((impactSpeed + strikeSpeed * 0.34) / 2200, 0.14, 0.86);
+  const relativeNormalSpeed = rvx * nx + rvy * ny;
 
-  if (closingSpeed < 0) {
-    const impulse = (1 + MALLET_RESTITUTION) * impactSpeed;
+  // Only resolve if objects are approaching each other
+  if (relativeNormalSpeed < 0) {
+    // Treat mallet as infinite mass: puck gets the full impulse
+    const impulse = -(1 + MALLET_RESTITUTION) * relativeNormalSpeed;
     puck.vx += nx * impulse;
     puck.vy += ny * impulse;
   }
 
-  const carry = clamp(0.08 + (strikeSpeed / HUMAN_MALLET_MAX_SPEED) * 0.14, 0.08, 0.22);
-  puck.vx += (mallet.vx - puck.vx) * carry;
-  puck.vy += (mallet.vy - puck.vy) * carry;
-
-  const push = Math.min(90, strikeSpeed * 0.028);
-  puck.vx += nx * push;
-  puck.vy += ny * push;
-  puck.vx *= 0.988;
-  puck.vy *= 0.988;
+  const strikeSpeed = Math.max(0, mallet.vx * nx + mallet.vy * ny);
+  const impactSpeed = Math.max(0, -relativeNormalSpeed);
+  const intensity = clamp((impactSpeed + strikeSpeed * 0.34) / 2800, 0.14, 0.86);
 
   capPuckSpeed(puck);
   room.updatedAt = Date.now();
@@ -939,7 +941,7 @@ function collidePucks(a, b) {
 
   const nx = dx / distance;
   const ny = dy / distance;
-  const overlap = (minDistance - distance) / 2;
+  const overlap = (minDistance - distance) / 2 + 0.5;
   a.x -= nx * overlap;
   a.y -= ny * overlap;
   b.x += nx * overlap;
@@ -949,9 +951,10 @@ function collidePucks(a, b) {
   const dvy = b.vy - a.vy;
   const impact = dvx * nx + dvy * ny;
   if (impact > 0) return 0;
-  const intensity = clamp(Math.abs(impact) / 1800, 0.12, 0.82);
+  const intensity = clamp(Math.abs(impact) / 2400, 0.12, 0.82);
 
-  const impulse = -(1 + PUCK_RESTITUTION) * impact * 0.46;
+  // Equal mass elastic collision: each puck gets half the impulse
+  const impulse = -(1 + PUCK_RESTITUTION) * impact * 0.5;
   a.vx -= impulse * nx;
   a.vy -= impulse * ny;
   b.vx += impulse * nx;
@@ -1331,10 +1334,10 @@ function capPuckSpeed(puck) {
   if (speed > PUCK_MAX_SPEED) {
     puck.vx = (puck.vx / speed) * PUCK_MAX_SPEED;
     puck.vy = (puck.vy / speed) * PUCK_MAX_SPEED;
-  } else if (speed > 0 && speed < PUCK_MIN_LIVE_SPEED) {
-    const liveFloor = PUCK_MIN_LIVE_SPEED * 0.55;
-    puck.vx = (puck.vx / speed) * liveFloor;
-    puck.vy = (puck.vy / speed) * liveFloor;
+  } else if (speed > 0 && speed < PUCK_MIN_LIVE_SPEED * 0.3) {
+    // Let very slow pucks come to rest naturally
+    puck.vx = 0;
+    puck.vy = 0;
   }
 }
 

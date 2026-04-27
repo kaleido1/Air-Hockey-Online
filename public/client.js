@@ -3,14 +3,6 @@ let ctx =
   canvas.getContext("2d", { alpha: false, desynchronized: true }) ||
   canvas.getContext("2d");
 
-const restartImg = new Image();
-restartImg.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(`
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="-30 -30 60 60" width="60" height="60">
-  <path d="M 18.13 -3.67 A 18.5 18.5 0 1 0 4.14 -18.02" fill="none" stroke="blue" stroke-width="6.5" stroke-linecap="round" />
-  <polygon points="16.8,-18.8 32.5,-12.6 20.5,-0.2" fill="blue" />
-</svg>
-`);
-
 const els = {
   youScore: document.querySelector("#youScore"),
   opponentScore: document.querySelector("#opponentScore"),
@@ -1531,13 +1523,27 @@ function drawRestartBubble() {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.font = "800 30px Arial, sans-serif";
-  ctx.fillStyle = "#376bbf";
+  ctx.fillStyle = "#1a6dff";
   ctx.shadowColor = "rgba(255,255,255,0.86)";
   ctx.shadowBlur = 6;
   ctx.fillText(t("resetGame"), TABLE.width / 2, 108);
   ctx.translate(TABLE.width / 2, 182);
   ctx.shadowBlur = 0;
-  ctx.drawImage(restartImg, -30, -30, 60, 60);
+  ctx.strokeStyle = "#1a6dff";
+  ctx.lineWidth = 6.5;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.arc(0, 0, 18.5, -0.2, Math.PI * 1.58, true);
+  ctx.stroke();
+
+  ctx.fillStyle = "#1a6dff";
+  ctx.beginPath();
+  ctx.moveTo(16.8, -18.8);
+  ctx.lineTo(32.5, -12.6);
+  ctx.lineTo(20.5, -0.2);
+  ctx.closePath();
+  ctx.fill();
   ctx.restore();
 }
 
