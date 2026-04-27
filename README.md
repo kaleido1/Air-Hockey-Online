@@ -47,3 +47,6 @@ Online mode supports remote play through room creation and room join flows. Play
 ## License
 
 This project is licensed under the [MIT License](./LICENSE).
+
+Some visual or design-reference elements may be subject to additional
+non-commercial restrictions. See [NOTICE](./NOTICE).

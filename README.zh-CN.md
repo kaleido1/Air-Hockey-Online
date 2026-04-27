@@ -47,3 +47,6 @@ https://air-hockey-online-kaleido1.onrender.com/
 ## License
 
 本项目采用 [MIT License](./LICENSE) 开源。
+
+部分视觉或设计参考元素可能附带额外的非商用限制，详见
+[NOTICE](./NOTICE)。
