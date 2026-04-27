@@ -203,7 +203,6 @@ let serverState = null;
 let previousState = null;
 let lastStateReceivedAt = 0;
 let measuredRttMs = 24;
-let serverClockOffsetMs = 0;
 const stateSnapshots = [];
 let roomPlayers = null;
 let pendingRoomFromUrl = new URLSearchParams(location.search).get("room") || "";
@@ -680,7 +679,6 @@ function clearRoom() {
   serverState = null;
   previousState = null;
   lastStateReceivedAt = 0;
-  serverClockOffsetMs = 0;
   stateSnapshots.length = 0;
   roomPlayers = null;
   predictedMallets.clear();
@@ -1101,50 +1099,27 @@ function resizeCanvas() {
 }
 
 function rememberStateSnapshot(message) {
-  const receivedAt = performance.now();
   const serverTime = Number(message.now) || Date.now();
-  const offset = serverTime - receivedAt;
-  serverClockOffsetMs = serverClockOffsetMs ? serverClockOffsetMs * 0.9 + offset * 0.1 : offset;
-
   stateSnapshots.push({
     serverTime,
+    receivedAt: performance.now(),
     state: message.state
   });
-
-  const cutoff = serverTime - 500;
-  while (stateSnapshots.length > 2 && stateSnapshots[0].serverTime < cutoff) {
-    stateSnapshots.shift();
-  }
-  while (stateSnapshots.length > 12) stateSnapshots.shift();
+  while (stateSnapshots.length > 3) stateSnapshots.shift();
 }
 
 function renderState() {
   if (!serverState) return null;
   if (serverState.phase !== "playing" || stateSnapshots.length < 2) return serverState;
 
-  const interpolationDelayMs = Math.max(50, Math.min(82, 46 + measuredRttMs * 0.25));
-  const targetServerTime = performance.now() + serverClockOffsetMs - interpolationDelayMs;
-  let previous = null;
-  let next = null;
-
-  for (const snapshot of stateSnapshots) {
-    if (snapshot.serverTime <= targetServerTime) previous = snapshot;
-    if (snapshot.serverTime >= targetServerTime) {
-      next = snapshot;
-      break;
-    }
-  }
-
-  if (!previous) return stateSnapshots[0]?.state || serverState;
-  if (!next) return previous.state;
-  if (previous === next || next.serverTime <= previous.serverTime) return next.state;
+  const previous = stateSnapshots[stateSnapshots.length - 2];
+  const next = stateSnapshots[stateSnapshots.length - 1];
+  if (!previous || !next) return serverState;
   if (previous.state.phase !== next.state.phase) return next.state;
 
-  const alpha = clamp(
-    (targetServerTime - previous.serverTime) / (next.serverTime - previous.serverTime),
-    0,
-    1
-  );
+  const snapshotSpanMs = clamp(next.serverTime - previous.serverTime || 1000 / 60, 1000 / 90, 1000 / 24);
+  const elapsedSinceReceive = Math.max(0, performance.now() - lastStateReceivedAt);
+  const alpha = clamp((elapsedSinceReceive + measuredRttMs * 0.08) / snapshotSpanMs, 0, 1);
   return interpolateState(previous.state, next.state, alpha);
 }
 

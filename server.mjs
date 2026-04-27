@@ -676,6 +676,11 @@ function updateInput(client, message) {
   mallet.vy = (dy / inputDt) * velocityScale;
   mallet.lastInputAt = now;
   mallet.directInputUntil = now + 90;
+
+  if (room.state.phase === "playing") {
+    resolveInputHits(room, mallet, playerIndex, inputDt);
+  }
+
   room.updatedAt = now;
 }
 
@@ -748,6 +753,19 @@ function moveMallets(state, dt) {
 
     mallet.vx = (mallet.x - previousX) / dt;
     mallet.vy = (mallet.y - previousY) / dt;
+  }
+}
+
+function resolveInputHits(room, mallet, malletIndex, dt) {
+  for (const puck of room.state.pucks) {
+    const hit = collidePuckWithMallet(room, puck, mallet, malletIndex, dt);
+    if (!hit) continue;
+    for (const currentMallet of room.state.mallets) {
+      forceSeparatePuckFromMallet(room, puck, currentMallet);
+    }
+    collidePuckWithWalls(room, puck);
+    capPuckSpeed(puck);
+    emitFx(room, "hit", false, hit);
   }
 }
 
