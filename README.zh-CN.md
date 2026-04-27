@@ -43,3 +43,7 @@ https://air-hockey-online-kaleido1.onrender.com/
 - 使用 Canvas 渲染球桌、冰球、球拍、界面和覆盖层。
 - 使用服务端权威物理与多人同步逻辑保证联机一致性。
 - 支持中英文界面与浏览器端多人房间流程管理。
+
+## License
+
+本项目采用 [MIT License](./LICENSE) 开源。

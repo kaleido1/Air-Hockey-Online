@@ -43,3 +43,7 @@ Online mode supports remote play through room creation and room join flows. Play
 - Canvas rendering for the rink, puck, mallets, overlays, and menus.
 - Server-authoritative physics and multiplayer synchronization.
 - Bilingual interface and browser-based multiplayer session management.
+
+## License
+
+This project is licensed under the [MIT License](./LICENSE).
