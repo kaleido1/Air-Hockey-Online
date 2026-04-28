@@ -273,6 +273,7 @@ const ENABLE_LOCAL_PUCK_PREDICTION = true;
 const INPUT_SWEEP_STEP_PIXELS = 1.5;
 const MAX_INPUT_SWEEP_STEPS = 144;
 const puckCorrections = new Map();
+const localPredictedPucks = new Map();
 let nextInputSeq = 1;
 let lastAckInputSeq = 0;
 let lastLocalHitFxAt = 0;
@@ -891,6 +892,7 @@ function clearRoom() {
   roomPlayers = null;
   predictedMallets.clear();
   puckCorrections.clear();
+  localPredictedPucks.clear();
   nextInputSeq = 1;
   lastAckInputSeq = 0;
   lastServerTickExtended = null;
@@ -910,6 +912,7 @@ function clearRoom() {
 function applyPuckCorrection(nextState) {
   if (!nextState?.pucks?.length || !serverState?.pucks?.length) {
     puckCorrections.clear();
+    localPredictedPucks.clear();
     return;
   }
 
@@ -920,10 +923,22 @@ function applyPuckCorrection(nextState) {
       puckCorrections.delete(id);
     }
   }
+  for (const [id, prediction] of localPredictedPucks.entries()) {
+    if (!incoming.has(id) || prediction.expiresAt <= now) {
+      localPredictedPucks.delete(id);
+    }
+  }
 
   for (const puck of serverState.pucks) {
     const authoritative = incoming.get(puck.id);
     if (!authoritative) continue;
+    const prediction = localPredictedPucks.get(puck.id);
+    if (prediction) {
+      const predictionDelta = Math.hypot(prediction.x - authoritative.x, prediction.y - authoritative.y);
+      if (predictionDelta < 3 || prediction.expiresAt <= now) {
+        localPredictedPucks.delete(puck.id);
+      }
+    }
     const dx = puck.x - authoritative.x;
     const dy = puck.y - authoritative.y;
     const distance = Math.hypot(dx, dy);
@@ -975,7 +990,7 @@ function sendPointerFromPoint(point, force, targetIndex) {
   if (!isActivePlay()) return;
   if (!roomCode || playerIndex === null) return;
   const now = performance.now();
-  const inputIntervalMs = 1000 / clamp(displayRefreshHz * 1.15, 120, 240);
+  const inputIntervalMs = 1000 / 180;
   const previousInputAt = lastInputAtByPlayer[targetIndex] || now - 1000 / 120;
   if (!force && now - lastInputAtByPlayer[targetIndex] < inputIntervalMs) return;
   lastInputAtByPlayer[targetIndex] = now;
@@ -1110,6 +1125,14 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
     puck.y += puck.vy * 0.014;
     puck.localPredictedAt = now;
     puck.localPredictionExpiresAt = now + LOCAL_PREDICTION_WINDOW_MS;
+    localPredictedPucks.set(puck.id, {
+      x: puck.x,
+      y: puck.y,
+      vx: puck.vx,
+      vy: puck.vy,
+      startedAt: now,
+      expiresAt: now + LOCAL_PREDICTION_WINDOW_MS
+    });
     lastLocalHitFxAt = performance.now();
     playFx("hit", Math.min(1, strike / 900));
   }
@@ -1522,9 +1545,23 @@ function interpolateBody(from, to, alpha) {
 }
 
 function displayPuck(puck) {
+  const prediction = localPredictedPucks.get(puck.id);
+  const now = performance.now();
+  if (prediction) {
+    if (now >= prediction.expiresAt) {
+      localPredictedPucks.delete(puck.id);
+    } else {
+      return {
+        ...puck,
+        x: prediction.x,
+        y: prediction.y,
+        vx: prediction.vx,
+        vy: prediction.vy
+      };
+    }
+  }
   const correction = puckCorrections.get(puck.id);
   if (!correction) return puck;
-  const now = performance.now();
   if (now >= correction.expiresAt) {
     puckCorrections.delete(puck.id);
     return puck;
