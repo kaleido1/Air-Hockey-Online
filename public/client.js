@@ -268,6 +268,8 @@ let canvasMetrics = null;
 let currentCursor = "";
 const predictedMallets = new Map();
 const LOCAL_PREDICTION_WINDOW_MS = 90;
+const LOCAL_PREDICTION_RELEASE_MS = 42;
+const LOCAL_REHIT_SUPPRESSION_MS = 10;
 const LOCAL_CONTACT_SEPARATION = 0.12;
 const ENABLE_LOCAL_PUCK_PREDICTION = true;
 const INPUT_SWEEP_STEP_PIXELS = 1.5;
@@ -1064,7 +1066,7 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
   if (Math.abs(sweepX) < 0.001 && Math.abs(sweepY) < 0.001) return;
 
   for (const puck of serverState.pucks) {
-    if (puck.localPredictedAt && now - puck.localPredictedAt < 22) continue;
+    if (puck.localPredictedAt && now - puck.localPredictedAt < LOCAL_REHIT_SUPPRESSION_MS) continue;
     const visualPuck = puck;
     const relativeStartX = visualPuck.x - fromX;
     const relativeStartY = visualPuck.y - fromY;
@@ -1551,10 +1553,11 @@ function displayPuck(puck) {
     if (now >= prediction.expiresAt) {
       localPredictedPucks.delete(puck.id);
     } else {
+      const coastSeconds = clamp((now - prediction.startedAt) / 1000, 0, LOCAL_PREDICTION_RELEASE_MS / 1000);
       return {
         ...puck,
-        x: prediction.x,
-        y: prediction.y,
+        x: prediction.x + prediction.vx * coastSeconds,
+        y: prediction.y + prediction.vy * coastSeconds,
         vx: prediction.vx,
         vy: prediction.vy
       };
