@@ -15,6 +15,7 @@ const publicDir = path.join(__dirname, "public");
 const HOST = process.env.HOST || process.env.HOSTNAME || "127.0.0.1";
 const PORT = Number(process.env.PORT || 3100);
 const PROTOCOL_VERSION = 2;
+const ENABLE_SERVER_LISTEN = process.env.AIR_HOCKEY_NO_LISTEN !== "1";
 
 const TABLE = {
   width: 590,
@@ -50,8 +51,8 @@ const EDGE_BLOCK_RESPONSE_SPEED = 48;
 const STRONG_STRIKE_MIN_SPEED = 180;
 const STRIKE_ESCAPE_TRANSFER = 0.42;
 const PUCK_SUBSTEPS = 18;
-const INPUT_SWEEP_STEP_PIXELS = 18;
-const MAX_INPUT_SWEEP_STEPS = 12;
+const INPUT_SWEEP_STEP_PIXELS = 5;
+const MAX_INPUT_SWEEP_STEPS = 30;
 const FRICTION_PER_SECOND = 0.991;
 const STUCK_SPEED = 95;
 const STUCK_SECONDS = 0.38;
@@ -175,13 +176,15 @@ server.on("upgrade", (req, socket) => {
   socket.on("close", () => disconnect(client));
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`Online Air Hockey running at http://${HOST}:${PORT}`);
-});
+if (ENABLE_SERVER_LISTEN) {
+  server.listen(PORT, HOST, () => {
+    console.log(`Online Air Hockey running at http://${HOST}:${PORT}`);
+  });
 
-setInterval(tickRooms, 1000 / PHYSICS_HZ);
-setInterval(sendSnapshots, 1000 / SNAPSHOT_HZ);
-setInterval(cleanupRooms, 10_000);
+  setInterval(tickRooms, 1000 / PHYSICS_HZ);
+  setInterval(sendSnapshots, 1000 / SNAPSHOT_HZ);
+  setInterval(cleanupRooms, 10_000);
+}
 
 function readFrames(client, chunk) {
   client.buffer = Buffer.concat([client.buffer, chunk]);
@@ -825,6 +828,7 @@ function applyDirectInputSweep(room, mallet, malletIndex, targetX, targetY, inpu
       forceSeparatePuckFromMallet(room, puck, mallet);
       collidePuckWithWalls(room, puck);
       capPuckSpeed(puck);
+      syncPuckHistory(puck);
     }
   }
 
@@ -1080,6 +1084,12 @@ function forceSeparatePuckFromAllMallets(room, puck) {
       forceSeparatePuckFromMallet(room, puck, mallet);
     }
   }
+  syncPuckHistory(puck);
+}
+
+function syncPuckHistory(puck) {
+  puck.prevX = puck.x;
+  puck.prevY = puck.y;
 }
 
 function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
@@ -1133,6 +1143,9 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
         if (t0 >= 0 && t0 <= 1) {
           hit = true;
           hitT = t0;
+        } else if (t1 >= 0 && t1 <= 1 && relativeStartDistance <= collisionDistance) {
+          hit = true;
+          hitT = 0;
         }
       }
     }
@@ -1258,7 +1271,7 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
     puck.vy += ny * impulse;
   }
 
-  if (strikeSpeed > 90) {
+  if (strikeSpeed > 90 || strongDrive) {
     const puckNormalSpeed = puck.vx * nx + puck.vy * ny;
     const targetNormalSpeed = Math.max(
       PUCK_MIN_LIVE_SPEED,
@@ -1947,6 +1960,54 @@ function makeRoomCode() {
 
 function normalizePuckCount(value) {
   return Number(value) === 2 ? 2 : 1;
+}
+
+export function runPhysicsSelfTest() {
+  const room = makeRoom({ puckCount: 1, local: true });
+  room.players = [null, null];
+  room.state.phase = "playing";
+  room.state.pucks = [
+    {
+      id: "p0",
+      x: TABLE.width / 2,
+      y: TABLE.height * 0.72,
+      prevX: TABLE.width / 2,
+      prevY: TABLE.height * 0.72,
+      vx: 0,
+      vy: 0,
+      stuckFor: 0,
+      lastMalletHitIndex: null,
+      lastMalletHitAt: 0
+    }
+  ];
+
+  const mallet = room.state.mallets[0];
+  mallet.x = TABLE.width / 2 - 150;
+  mallet.y = TABLE.height * 0.72;
+  mallet.targetX = mallet.x;
+  mallet.targetY = mallet.y;
+  mallet.lastInputAt = Date.now() - 16;
+  mallet.sweepFromX = mallet.x;
+  mallet.sweepFromY = mallet.y;
+  mallet.sweepStartedAt = mallet.lastInputAt;
+  mallet.hasPendingSweep = true;
+
+  const targetX = TABLE.width / 2 + 150;
+  const targetY = TABLE.height * 0.72;
+  const inputDt = 1 / 60;
+  const baseVx = (targetX - mallet.x) / inputDt;
+  const baseVy = 0;
+  applyDirectInputSweep(room, mallet, 0, targetX, targetY, inputDt, Date.now(), baseVx, baseVy);
+
+  const puck = room.state.pucks[0];
+  const speed = Math.hypot(puck.vx, puck.vy);
+  rooms.delete(room.code);
+
+  return {
+    speed,
+    puck,
+    passed: speed >= 520 && puck.x > TABLE.width / 2 + TABLE.puckRadius
+  };
 }
 
 function constrainMallet(index, x, y) {

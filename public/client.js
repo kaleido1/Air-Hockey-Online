@@ -270,6 +270,8 @@ const predictedMallets = new Map();
 const LOCAL_PREDICTION_WINDOW_MS = 90;
 const LOCAL_CONTACT_SEPARATION = 0.75;
 const ENABLE_LOCAL_PUCK_PREDICTION = true;
+const INPUT_SWEEP_STEP_PIXELS = 5;
+const MAX_INPUT_SWEEP_STEPS = 30;
 const puckCorrections = new Map();
 let nextInputSeq = 1;
 let lastAckInputSeq = 0;
@@ -974,6 +976,7 @@ function sendPointerFromPoint(point, force, targetIndex) {
   if (!roomCode || playerIndex === null) return;
   const now = performance.now();
   const inputIntervalMs = 1000 / clamp(displayRefreshHz * 1.15, 120, 240);
+  const previousInputAt = lastInputAtByPlayer[targetIndex] || now - 1000 / 120;
   if (!force && now - lastInputAtByPlayer[targetIndex] < inputIntervalMs) return;
   lastInputAtByPlayer[targetIndex] = now;
   let constrained = constrainForPlayer(targetIndex, point.x, point.y);
@@ -993,7 +996,15 @@ function sendPointerFromPoint(point, force, targetIndex) {
     expiresAt: performance.now() + 180
   });
   if (ENABLE_LOCAL_PUCK_PREDICTION) {
-    applyLocalStrikePrediction(targetIndex, fromX, fromY, constrained.x, constrained.y, now);
+    applySegmentedLocalStrikePrediction(
+      targetIndex,
+      fromX,
+      fromY,
+      constrained.x,
+      constrained.y,
+      previousInputAt,
+      now
+    );
   }
   sendRealtime(
     encodeInputPacket({
@@ -1006,7 +1017,28 @@ function sendPointerFromPoint(point, force, targetIndex) {
   );
 }
 
-function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
+function applySegmentedLocalStrikePrediction(index, fromX, fromY, toX, toY, previousInputAt, now) {
+  const dx = toX - fromX;
+  const dy = toY - fromY;
+  const distance = Math.hypot(dx, dy);
+  if (distance <= 0.001) return;
+
+  const inputDt = clamp((now - previousInputAt) / 1000, 1 / 240, 1 / 24);
+  const malletSpeed = distance / inputDt;
+  const steps = clamp(Math.ceil(distance / INPUT_SWEEP_STEP_PIXELS), 1, MAX_INPUT_SWEEP_STEPS);
+  let startX = fromX;
+  let startY = fromY;
+
+  for (let step = 1; step <= steps; step += 1) {
+    const endX = lerp(fromX, toX, step / steps);
+    const endY = lerp(fromY, toY, step / steps);
+    applyLocalStrikePrediction(index, startX, startY, endX, endY, now, malletSpeed);
+    startX = endX;
+    startY = endY;
+  }
+}
+
+function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSpeedOverride = null) {
   if (!serverState?.pucks?.length) return;
   const malletRadius = TABLE.malletRadius;
   const puckRadius = TABLE.puckRadius;
@@ -1015,7 +1047,7 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
   const collisionDistance = minDistance + contactSkin;
   const sweepX = toX - fromX;
   const sweepY = toY - fromY;
-  const malletSpeed = Math.hypot(sweepX, sweepY) * 120;
+  const malletSpeed = malletSpeedOverride ?? Math.hypot(sweepX, sweepY) * 120;
   if (Math.abs(sweepX) < 0.001 && Math.abs(sweepY) < 0.001) return;
 
   for (const puck of serverState.pucks) {
