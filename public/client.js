@@ -222,8 +222,7 @@ let audioMasterGain = null;
 let audioPrimed = false;
 let audioUnlockPromise = null;
 let audioUnlockedByGesture = false;
-let iosAudio = null;
-let iosAudioUnlocked = false;
+let audioActivationPrimed = false;
 let statusRaw = "chooseMode";
 let statusText = t("chooseMode");
 const playerKey = getPlayerKey();
@@ -297,9 +296,7 @@ window.addEventListener("pageshow", () => {
 
 function enableSoundFromGesture() {
   if (!soundEnabled) return Promise.resolve(false);
-  const audioReady = activateAudioFromGesture();
-  if (isIOS) ensureIOSAudioUnlocked();
-  return audioReady;
+  return activateAudioFromGesture();
 }
 
 els.onePuckButton.addEventListener("click", () => setPuckCount(1));
@@ -378,6 +375,14 @@ canvas.addEventListener("pointerdown", (event) => {
     sendPointer(event, true);
   }
 });
+
+canvas.addEventListener(
+  "touchstart",
+  () => {
+    void activateAudioFromGesture();
+  },
+  { capture: true, passive: false }
+);
 
 canvas.addEventListener("pointermove", (event) => {
   if (!isActivePlay()) return;
@@ -2508,45 +2513,48 @@ function ensureAudioContext() {
 
 function activateAudioFromGesture() {
   if (!soundEnabled) return Promise.resolve(false);
+  const context = ensureAudioContext();
+  if (!context) return Promise.resolve(false);
+  primeAudioActivation();
   return unlockAudio(true);
-}
-
-function ensureIOSAudioElement() {
-  if (!isIOS) return null;
-  if (iosAudio) return iosAudio;
-  iosAudio = new Audio();
-  iosAudio.preload = "auto";
-  iosAudio.playsInline = true;
-  iosAudio.setAttribute("playsinline", "");
-  iosAudio.src = getSilentAudioDataUri();
-  return iosAudio;
-}
-
-function ensureIOSAudioUnlocked() {
-  const element = ensureIOSAudioElement();
-  if (!element || iosAudioUnlocked) return Promise.resolve(iosAudioUnlocked);
-  element.currentTime = 0;
-  const playPromise = element.play();
-  if (!playPromise || typeof playPromise.then !== "function") {
-    iosAudioUnlocked = true;
-    return Promise.resolve(true);
-  }
-  return playPromise
-    .then(() => {
-      iosAudioUnlocked = true;
-      element.pause();
-      try {
-        element.currentTime = 0;
-      } catch {
-        // Safari can be touchy about resetting currentTime immediately.
-      }
-      return true;
-    })
-    .catch(() => false);
 }
 
 function getAudioOutput() {
   return audioMasterGain || audio?.destination || null;
+}
+
+function startSourceNow(source, when) {
+  if (typeof source.start === "function") {
+    source.start(when);
+    return;
+  }
+  if (typeof source.noteOn === "function") {
+    source.noteOn(when);
+  }
+}
+
+function stopSourceNow(source, when) {
+  if (typeof source.stop === "function") {
+    source.stop(when);
+    return;
+  }
+  if (typeof source.noteOff === "function") {
+    source.noteOff(when);
+  }
+}
+
+function primeAudioActivation() {
+  if (!audio || !getAudioOutput() || audioActivationPrimed) return;
+  const now = audio.currentTime;
+  const silentGain = audio.createGain();
+  silentGain.gain.setValueAtTime(0.00001, now);
+  silentGain.connect(getAudioOutput());
+  const source = audio.createBufferSource();
+  source.buffer = audio.createBuffer(1, 1, Math.max(22050, audio.sampleRate || 22050));
+  source.connect(silentGain);
+  startSourceNow(source, now);
+  stopSourceNow(source, now + 0.001);
+  audioActivationPrimed = true;
 }
 
 function primeAudioContext() {
@@ -2562,14 +2570,17 @@ function primeAudioContext() {
   oscillator.type = "sine";
   oscillator.frequency.setValueAtTime(440, now);
   oscillator.connect(gain);
-  oscillator.start(now);
-  oscillator.stop(now + 0.06);
+  startSourceNow(oscillator, now);
+  stopSourceNow(oscillator, now + 0.06);
   audioPrimed = true;
 }
 
 function recoverAudioContext() {
   if (!soundEnabled || !audio) return Promise.resolve(false);
   if (audio.state === "running") return Promise.resolve(true);
+  if (audio.state === "interrupted") {
+    return audio.resume().then(() => audio.state === "running").catch(() => false);
+  }
   return audio.resume().then(() => audio.state === "running").catch(() => false);
 }
 
@@ -2580,7 +2591,7 @@ function unlockAudio(fromGesture = true) {
 
   if (fromGesture) {
     audioUnlockedByGesture = true;
-    if (isIOS) ensureIOSAudioUnlocked();
+    primeAudioActivation();
   }
 
   if (context.state === "running") {
@@ -2639,10 +2650,6 @@ function playFx(kind, intensity = 0.5) {
   }
 
   playIceClick(now, force, 960 + force * 220, 0.09 + force * 0.045);
-}
-
-function getSilentAudioDataUri() {
-  return "data:audio/mp4;base64,AAAAHGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAABBmb2lzbwAAAAhmcmVlAAAAG21kYXQAAAGzABAHAAABthGYSaQAAAGkbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAABdwAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAzF0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAAdwAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAQAAAAEAAAAAAACkbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAyAAAAMgBVxAAAAAAtaGRscgAAAAAAAAAAbWRpcwAAAAAAAAAAU291bmRIYW5kbGVyAAAAAa9taW5mAAAAFHNtaGQAAAAAAAAAAAAAAACRZGluZgAAABxkcmVmAAAAAAAAAAEAAAAMdXJsIAAAAAEAAAGPc3RibAAAAG1zdHNkAAAAAAAAAAEAAABdbXA0YQAAAAAAAAABAAAAAQAAABRlc2RzAAAAA4CAgE8AAgAEgICAQAAACABIAAAAZCAgIAVAQAGgICAARiAgIAEAAAAAHRicnQAAAAAAAMcc3R0cwAAAAAAAAABAAAAAQAAAgAAAAAUc3RzYwAAAAAAAAABAAAAAQAAAAEAAAABAAAAHHN0c3oAAAAAAAAAAAAAAAEAAAB6AAAAFHN0Y28AAAAAAAAAAQAAADY=";
 }
 
 function playIceClick(start, intensity, resonance, duration) {
