@@ -35,7 +35,7 @@ export function decodeInputPacket(packet) {
 }
 
 export function encodeStatePacket(state, options = {}) {
-  const packet = new Uint8Array(45);
+  const packet = new Uint8Array(49);
   const view = new DataView(packet.buffer);
   const phaseIndex = Math.max(0, PHASES.indexOf(state.phase));
   const phaseEndsInMs = clampUint16(options.phaseEndsInMs || 0);
@@ -69,6 +69,13 @@ export function encodeStatePacket(state, options = {}) {
     offset += 8;
   }
 
+  for (let index = 0; index < MAX_PUCKS; index += 1) {
+    const puck = pucks[index];
+    packet[offset] = clampIndex(puck?.lastMalletHitIndex);
+    packet[offset + 1] = clampByte(puck?.hitSerial || 0);
+    offset += 2;
+  }
+
   return packet;
 }
 
@@ -94,6 +101,22 @@ export function decodeStatePacket(packet, now = Date.now()) {
       pucks.push(body);
     }
     offset += 8;
+  }
+
+  if (bytes.length >= offset + MAX_PUCKS * 2) {
+    for (let index = 0; index < MAX_PUCKS; index += 1) {
+      const puck = pucks.find((candidate) => candidate.id === `p${index}`);
+      if (puck) {
+        puck.lastMalletHitIndex = decodeIndex(bytes[offset]);
+        puck.hitSerial = bytes[offset + 1] || 0;
+      }
+      offset += 2;
+    }
+  } else {
+    for (const puck of pucks) {
+      puck.lastMalletHitIndex = null;
+      puck.hitSerial = 0;
+    }
   }
 
   const phase = PHASES[bytes[5]] || "waiting";

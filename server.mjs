@@ -1368,6 +1368,7 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   puck.prevY = puck.y;
   puck.lastMalletHitIndex = malletIndex;
   puck.lastMalletHitAt = now;
+  puck.hitSerial = ((puck.hitSerial || 0) + 1) & 0xff;
   rememberMalletRelease(puck, malletIndex, exitX, exitY, now);
 
   const impactSpeed = Math.max(0, -relativeNormalSpeed);
@@ -1712,7 +1713,8 @@ function resetPucks(room, scorer) {
       vy: 0,
       stuckFor: 0,
       lastMalletHitIndex: null,
-      lastMalletHitAt: 0
+      lastMalletHitAt: 0,
+      hitSerial: 0
     });
   }
 }
@@ -2021,7 +2023,9 @@ function publicState(state) {
       x: round(puck.x),
       y: round(puck.y),
       vx: round(puck.vx),
-      vy: round(puck.vy)
+      vy: round(puck.vy),
+      lastMalletHitIndex: puck.lastMalletHitIndex,
+      hitSerial: puck.hitSerial || 0
     }))
   };
 }

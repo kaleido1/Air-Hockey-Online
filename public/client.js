@@ -267,14 +267,18 @@ let puckSprite = null;
 let canvasMetrics = null;
 let currentCursor = "";
 const predictedMallets = new Map();
-const LOCAL_PREDICTION_WINDOW_MS = 90;
-const LOCAL_PREDICTION_RELEASE_MS = 48;
+const LOCAL_PREDICTION_WINDOW_MS = 900;
+const LOCAL_SAME_DEVICE_PREDICTION_WINDOW_MS = 2400;
+const LOCAL_PREDICTION_MAX_STEP = 1 / 240;
 const LOCAL_REHIT_SUPPRESSION_MS = 45;
 const LOCAL_BLOCK_INPUT_GRACE_MS = 58;
 const LOCAL_CONTACT_SEPARATION = 0.12;
 const LOCAL_HARD_CONTACT_SEPARATION = 1.0;
 const LOCAL_CONTACT_SLOP = 1.4;
 const LOCAL_BLOCK_RELEASE_SPEED = 180;
+const LOCAL_WALL_RESTITUTION = 0.94;
+const LOCAL_FRICTION_PER_SECOND = 0.991;
+const LOCAL_PUCK_MAX_SPEED = 2600;
 const ENABLE_LOCAL_PUCK_PREDICTION = true;
 const puckCorrections = new Map();
 const localPredictedPucks = new Map();
@@ -914,7 +918,7 @@ function clearRoom() {
 }
 
 function applyPuckCorrection(nextState, ackInputSeq = 0) {
-  if (!nextState?.pucks?.length || !serverState?.pucks?.length) {
+  if (nextState?.phase !== "playing" || !nextState?.pucks?.length || !serverState?.pucks?.length) {
     puckCorrections.clear();
     localPredictedPucks.clear();
     return;
@@ -938,11 +942,24 @@ function applyPuckCorrection(nextState, ackInputSeq = 0) {
     if (!authoritative) continue;
     const prediction = localPredictedPucks.get(puck.id);
     if (prediction) {
-      const predictionDelta = Math.hypot(prediction.x - authoritative.x, prediction.y - authoritative.y);
-      const serverAcknowledgedPrediction =
-        prediction.inputSeq && isInputSeqAcknowledged(ackInputSeq, prediction.inputSeq);
-      if (predictionDelta < 3 || prediction.expiresAt <= now || (serverAcknowledgedPrediction && predictionDelta > 8)) {
-        localPredictedPucks.delete(puck.id);
+      const predicted = advanceLocalPuckPrediction(prediction, now);
+      if (shouldKeepLocalPuckPrediction(prediction, authoritative, ackInputSeq)) {
+        puckCorrections.delete(puck.id);
+        continue;
+      }
+
+      localPredictedPucks.delete(puck.id);
+      const distanceFromPrediction = Math.hypot(predicted.x - authoritative.x, predicted.y - authoritative.y);
+      if (distanceFromPrediction >= 4) {
+        puckCorrections.set(puck.id, {
+          fromX: predicted.x,
+          fromY: predicted.y,
+          toX: authoritative.x,
+          toY: authoritative.y,
+          startedAt: now,
+          expiresAt: now + (distanceFromPrediction > 28 ? 44 : 80)
+        });
+        continue;
       }
     }
     const dx = puck.x - authoritative.x;
@@ -961,6 +978,79 @@ function applyPuckCorrection(nextState, ackInputSeq = 0) {
       expiresAt: now + (distance > 28 ? 44 : 80)
     });
   }
+}
+
+function shouldKeepLocalPuckPrediction(prediction, authoritative, ackInputSeq = 0) {
+  if (!prediction) return false;
+
+  const authoritativeHitSerial = authoritative.hitSerial || 0;
+  if (authoritativeHitSerial && authoritativeHitSerial !== prediction.serverHitSerial) {
+    if (isControlledMalletIndex(authoritative.lastMalletHitIndex)) {
+      prediction.serverHitSerial = authoritativeHitSerial;
+      return true;
+    }
+    return false;
+  }
+
+  if (prediction.inputSeq && !isInputSeqAcknowledged(ackInputSeq, prediction.inputSeq)) return true;
+
+  return true;
+}
+
+function isControlledMalletIndex(index) {
+  return controlledMalletIndices().includes(index);
+}
+
+function localPuckPredictionWindowMs() {
+  return isLocalGame() || roomSettings?.bot ? LOCAL_SAME_DEVICE_PREDICTION_WINDOW_MS : LOCAL_PREDICTION_WINDOW_MS;
+}
+
+function advanceLocalPuckPrediction(prediction, now) {
+  const lastUpdatedAt = prediction.updatedAt || prediction.startedAt || now;
+  let remaining = clamp((now - lastUpdatedAt) / 1000, 0, 0.12);
+  while (remaining > 0.000001) {
+    const dt = Math.min(remaining, LOCAL_PREDICTION_MAX_STEP);
+    prediction.vx *= Math.pow(LOCAL_FRICTION_PER_SECOND, dt);
+    prediction.vy *= Math.pow(LOCAL_FRICTION_PER_SECOND, dt);
+    prediction.x += prediction.vx * dt;
+    prediction.y += prediction.vy * dt;
+    collideLocalPredictedPuckWithWalls(prediction);
+    capLocalPredictedPuckSpeed(prediction);
+    remaining -= dt;
+  }
+  prediction.updatedAt = now;
+  return prediction;
+}
+
+function collideLocalPredictedPuckWithWalls(puck) {
+  const r = TABLE.puckRadius;
+  const goalLeft = TABLE.width / 2 - TABLE.goalWidth / 2;
+  const goalRight = TABLE.width / 2 + TABLE.goalWidth / 2;
+  const insideGoal = puck.x > goalLeft && puck.x < goalRight;
+
+  if (puck.x < r) {
+    puck.x = r;
+    puck.vx = Math.abs(puck.vx) * LOCAL_WALL_RESTITUTION;
+  } else if (puck.x > TABLE.width - r) {
+    puck.x = TABLE.width - r;
+    puck.vx = -Math.abs(puck.vx) * LOCAL_WALL_RESTITUTION;
+  }
+
+  if (puck.y < r && !insideGoal) {
+    puck.y = r;
+    puck.vy = Math.abs(puck.vy) * LOCAL_WALL_RESTITUTION;
+  } else if (puck.y > TABLE.height - r && !insideGoal) {
+    puck.y = TABLE.height - r;
+    puck.vy = -Math.abs(puck.vy) * LOCAL_WALL_RESTITUTION;
+  }
+}
+
+function capLocalPredictedPuckSpeed(puck) {
+  const speed = Math.hypot(puck.vx || 0, puck.vy || 0);
+  if (speed <= LOCAL_PUCK_MAX_SPEED || speed <= 0.001) return;
+  const scale = LOCAL_PUCK_MAX_SPEED / speed;
+  puck.vx *= scale;
+  puck.vy *= scale;
 }
 
 function sendPointer(event, force, overridePlayerIndex = null) {
@@ -1067,8 +1157,10 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
   if (Math.abs(sweepX) < 0.001 && Math.abs(sweepY) < 0.001) return;
 
   for (const puck of serverState.pucks) {
-    if (puck.localPredictedAt && now - puck.localPredictedAt < LOCAL_REHIT_SUPPRESSION_MS) continue;
-    const visualPuck = puck;
+    const existingPrediction = localPredictedPucks.get(puck.id);
+    if (existingPrediction && now - existingPrediction.startedAt < LOCAL_REHIT_SUPPRESSION_MS) continue;
+    if (!existingPrediction && puck.localPredictedAt && now - puck.localPredictedAt < LOCAL_REHIT_SUPPRESSION_MS) continue;
+    const visualPuck = existingPrediction ? advanceLocalPuckPrediction(existingPrediction, now) : puck;
     const relativeStartX = visualPuck.x - fromX;
     const relativeStartY = visualPuck.y - fromY;
     const relativeStartDistance = Math.hypot(relativeStartX, relativeStartY);
@@ -1134,8 +1226,11 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
       vx: puck.vx,
       vy: puck.vy,
       inputSeq,
+      ownerIndex: index,
+      serverHitSerial: existingPrediction?.serverHitSerial ?? visualPuck.hitSerial ?? 0,
       startedAt: now,
-      expiresAt: now + LOCAL_PREDICTION_WINDOW_MS
+      updatedAt: now,
+      expiresAt: now + localPuckPredictionWindowMs()
     });
     lastLocalHitFxAt = performance.now();
     playFx("hit", Math.min(1, strike / 900));
@@ -1556,13 +1651,13 @@ function displayPuck(puck, state) {
     if (now >= prediction.expiresAt) {
       localPredictedPucks.delete(puck.id);
     } else {
-      const coastSeconds = clamp((now - prediction.startedAt) / 1000, 0, LOCAL_PREDICTION_RELEASE_MS / 1000);
+      const predicted = advanceLocalPuckPrediction(prediction, now);
       return {
         ...puck,
-        x: prediction.x + prediction.vx * coastSeconds,
-        y: prediction.y + prediction.vy * coastSeconds,
-        vx: prediction.vx,
-        vy: prediction.vy
+        x: predicted.x,
+        y: predicted.y,
+        vx: predicted.vx,
+        vy: predicted.vy
       };
     }
   }
@@ -1632,8 +1727,11 @@ function maybePredictLocalBlockContact(puck, state) {
       vx,
       vy,
       inputSeq: mallet.inputSeq || 0,
+      ownerIndex: index,
+      serverHitSerial: puck.hitSerial || 0,
       startedAt: now,
-      expiresAt: now + LOCAL_PREDICTION_WINDOW_MS
+      updatedAt: now,
+      expiresAt: now + localPuckPredictionWindowMs()
     });
     lastLocalHitFxAt = now;
     playFx("hit", 0.34);
