@@ -413,15 +413,10 @@ els.copyButton.addEventListener("click", async () => {
   }
 });
 els.restartButton.addEventListener("click", () => {
-  if (offlineGame) {
-    restartOfflineGame();
-    return;
-  }
-  send({ type: "restart" });
+  restartCurrentGame();
 });
 els.leaveButton.addEventListener("click", () => {
-  if (!offlineGame) send({ type: "leave" });
-  clearRoom();
+  leaveCurrentGame();
 });
 
 canvas.addEventListener("pointerdown", (event) => {
@@ -988,6 +983,19 @@ function restartOfflineGame() {
   const mode = offlineGame.mode;
   const count = offlineGame.puckCount;
   startOfflineGame(mode, count);
+}
+
+function restartCurrentGame() {
+  if (offlineGame) {
+    restartOfflineGame();
+    return;
+  }
+  send({ type: "restart" });
+}
+
+function leaveCurrentGame() {
+  if (!offlineGame) send({ type: "leave" });
+  clearRoom();
 }
 
 function toggleOfflinePause() {
@@ -2113,7 +2121,11 @@ function handleTouchPause(event, point) {
   const now = performance.now();
   if (now - lastCenterTapAt <= 420) {
     lastCenterTapAt = 0;
-    send({ type: "pause" });
+    if (offlineGame) {
+      toggleOfflinePause();
+    } else {
+      send({ type: "pause" });
+    }
   } else {
     lastCenterTapAt = now;
   }
@@ -2245,7 +2257,7 @@ function clearControls() {
 }
 
 function exitToMain() {
-  send({ type: "leaveToMenu" });
+  if (!offlineGame) send({ type: "leaveToMenu" });
   clearRoom();
 }
 
@@ -2258,7 +2270,7 @@ function scheduleGameoverReturn() {
   gameoverReturnTimer = setTimeout(() => {
     gameoverReturnTimer = 0;
     if (serverState?.phase !== "gameover") return;
-    send({ type: "leaveToMenu" });
+    if (!offlineGame) send({ type: "leaveToMenu" });
     clearRoom();
   }, 2200);
 }
@@ -2645,7 +2657,7 @@ function drawMainMenu(interactive) {
     () => {
       runWithSoundGate(() => {
         if (roomCode) {
-          send({ type: "leaveToMenu" });
+          if (!offlineGame) send({ type: "leaveToMenu" });
           clearRoom();
         }
         clearRoomUrl();
@@ -2885,7 +2897,7 @@ function drawWaitingMenu(interactive) {
       });
     } else {
       addButton(back, () => {
-        send({ type: "leave" });
+        if (!offlineGame) send({ type: "leave" });
         clearRoom();
       });
     }
@@ -2954,7 +2966,7 @@ function drawPauseOverlay() {
   drawSpeakerIcon(140, 760, soundEnabled);
   ctx.restore();
 
-  addButton({ x: 202, y: 138, w: 186, h: 112 }, () => send({ type: "restart" }));
+  addButton({ x: 202, y: 138, w: 186, h: 112 }, restartCurrentGame);
   addButton({ x: 124, y: 22, w: 342, h: 116 }, exitToMain);
   addButton({ x: 62, y: 686, w: 172, h: 150 }, () => {
     soundEnabled = !soundEnabled;
