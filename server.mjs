@@ -55,6 +55,7 @@ const PUCK_SUBSTEPS = 18;
 const INPUT_SWEEP_STEP_PIXELS = 1.5;
 const MAX_INPUT_SWEEP_STEPS = 144;
 const IMMEDIATE_HIT_STATE_GAP_MS = 10;
+const MALLET_RELEASE_LOCK_MS = 72;
 const FRICTION_PER_SECOND = 0.991;
 const STUCK_SPEED = 95;
 const STUCK_SECONDS = 0.38;
@@ -837,7 +838,7 @@ function applyDirectInputSweep(room, mallet, malletIndex, targetX, targetY, inpu
     anyHit = resolveInputHits(room, mallet, malletIndex, stepDt, false) || anyHit;
 
     for (const puck of room.state.pucks) {
-      forceSeparatePuckFromMallet(room, puck, mallet);
+      forceSeparatePuckFromMallet(room, puck, mallet, malletIndex);
       collidePuckWithWalls(room, puck);
       capPuckSpeed(puck);
       syncPuckHistory(puck);
@@ -1060,13 +1061,34 @@ function rescueStuckPuck(room, puck, dt) {
   emitFx(room, "wall", true, 0.28);
 }
 
-function forceSeparatePuckFromMallet(room, puck, mallet) {
+function forceSeparatePuckFromMallet(room, puck, mallet, malletIndex = null) {
   const minDistance = TABLE.puckRadius + TABLE.malletRadius;
   const contact = getSatCircleContact(mallet.x, mallet.y, TABLE.malletRadius, puck.x, puck.y, TABLE.puckRadius);
   let dx = contact?.nx ?? puck.x - mallet.x;
   let dy = contact?.ny ?? puck.y - mallet.y;
   let distance = Math.hypot(dx, dy);
   if (!contact && distance >= minDistance) return;
+
+  const release = getActiveMalletRelease(puck, malletIndex);
+  if (release) {
+    const projectedDistance = (puck.x - mallet.x) * release.nx + (puck.y - mallet.y) * release.ny;
+    if (projectedDistance >= minDistance + CONTACT_SEPARATION) return;
+
+    const overlap = minDistance + CONTACT_SEPARATION - projectedDistance + 0.18;
+    puck.x += release.nx * overlap;
+    puck.y += release.ny * overlap;
+    const normalSpeed = puck.vx * release.nx + puck.vy * release.ny;
+    const malletReleaseSpeed = Math.max(0, mallet.vx * release.nx + mallet.vy * release.ny);
+    const escapeSpeed = Math.max(EDGE_BLOCK_RESPONSE_SPEED, malletReleaseSpeed * MALLET_STRIKE_TRANSFER);
+    if (normalSpeed < escapeSpeed) {
+      const correction = escapeSpeed - normalSpeed;
+      puck.vx += release.nx * correction;
+      puck.vy += release.ny * correction;
+      capPuckSpeed(puck);
+    }
+    return;
+  }
+
   if (distance <= 0.001) {
     dx = puck.vx - mallet.vx;
     dy = puck.vy - mallet.vy;
@@ -1101,8 +1123,8 @@ function forceSeparatePuckFromMallet(room, puck, mallet) {
 
 function forceSeparatePuckFromAllMallets(room, puck) {
   for (let pass = 0; pass < 2; pass += 1) {
-    for (const mallet of room.state.mallets) {
-      forceSeparatePuckFromMallet(room, puck, mallet);
+    for (let index = 0; index < room.state.mallets.length; index += 1) {
+      forceSeparatePuckFromMallet(room, puck, room.state.mallets[index], index);
     }
   }
   syncPuckHistory(puck);
@@ -1111,6 +1133,26 @@ function forceSeparatePuckFromAllMallets(room, puck) {
 function syncPuckHistory(puck) {
   puck.prevX = puck.x;
   puck.prevY = puck.y;
+}
+
+function getActiveMalletRelease(puck, malletIndex, now = Date.now()) {
+  if (malletIndex === null || puck.releaseMalletIndex !== malletIndex) return null;
+  if (!puck.releaseUntil || now >= puck.releaseUntil) return null;
+  const length = Math.hypot(puck.releaseNx || 0, puck.releaseNy || 0);
+  if (length <= 0.001) return null;
+  return {
+    nx: puck.releaseNx / length,
+    ny: puck.releaseNy / length
+  };
+}
+
+function rememberMalletRelease(puck, malletIndex, nx, ny, now = Date.now()) {
+  const length = Math.hypot(nx, ny);
+  if (length <= 0.001) return;
+  puck.releaseMalletIndex = malletIndex;
+  puck.releaseNx = nx / length;
+  puck.releaseNy = ny / length;
+  puck.releaseUntil = now + MALLET_RELEASE_LOCK_MS;
 }
 
 function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
@@ -1196,8 +1238,23 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
     }
   }
 
-  const nx = dx / distance;
-  const ny = dy / distance;
+  let nx = dx / distance;
+  let ny = dy / distance;
+  const release = getActiveMalletRelease(puck, malletIndex, now);
+  if (release) {
+    const releaseDistance = (probeX - contactX) * release.nx + (probeY - contactY) * release.ny;
+    const releaseSpeed = puck.vx * release.nx + puck.vy * release.ny;
+    const malletReleaseSpeed = strikeVx * release.nx + strikeVy * release.ny;
+    const alreadyReleased =
+      releaseDistance >= minDistance - CONTACT_SLOP &&
+      releaseSpeed >= EDGE_BLOCK_RESPONSE_SPEED &&
+      malletReleaseSpeed <= releaseSpeed + 80;
+    if (alreadyReleased) return false;
+    if (releaseDistance > minDistance * 0.42) {
+      nx = release.nx;
+      ny = release.ny;
+    }
+  }
 
   puck.x = contactX + nx * (minDistance + CONTACT_SEPARATION);
   puck.y = contactY + ny * (minDistance + CONTACT_SEPARATION);
@@ -1319,6 +1376,7 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   puck.prevY = puck.y;
   puck.lastMalletHitIndex = malletIndex;
   puck.lastMalletHitAt = now;
+  rememberMalletRelease(puck, malletIndex, exitX, exitY, now);
 
   const impactSpeed = Math.max(0, -relativeNormalSpeed);
   const intensity = clamp((impactSpeed + strikeSpeed * 0.34) / 3500, 0.14, 0.86);
@@ -2162,6 +2220,54 @@ export function runRepeatedContactReleaseSelfTest() {
     vy: puck.vy,
     speed: Math.hypot(puck.vx, puck.vy),
     passed: Boolean(hit) && puck.vx >= PUCK_MIN_LIVE_SPEED
+  };
+}
+
+export function runMalletReleaseLockSelfTest() {
+  const now = Date.now();
+  const room = {
+    state: {
+      pucks: [],
+      mallets: []
+    },
+    players: [],
+    lastFxAt: new Map(),
+    updatedAt: now
+  };
+  const mallet = {
+    x: 300,
+    y: 760,
+    vx: 480,
+    vy: 0
+  };
+  const puck = {
+    id: "release-lock",
+    x: 250,
+    y: 760,
+    prevX: 250,
+    prevY: 760,
+    vx: 0,
+    vy: 0,
+    stuckFor: 0,
+    releaseMalletIndex: 0,
+    releaseNx: -1,
+    releaseNy: 0,
+    releaseUntil: now + MALLET_RELEASE_LOCK_MS
+  };
+  room.state.mallets = [mallet];
+  room.state.pucks = [puck];
+
+  forceSeparatePuckFromMallet(room, puck, mallet, 0);
+  const releaseDistance = (puck.x - mallet.x) * puck.releaseNx + (puck.y - mallet.y) * puck.releaseNy;
+  const releaseSpeed = puck.vx * puck.releaseNx + puck.vy * puck.releaseNy;
+  return {
+    x: puck.x,
+    y: puck.y,
+    releaseDistance,
+    releaseSpeed,
+    passed:
+      releaseDistance >= TABLE.malletRadius + TABLE.puckRadius + CONTACT_SEPARATION &&
+      releaseSpeed >= EDGE_BLOCK_RESPONSE_SPEED
   };
 }
 
