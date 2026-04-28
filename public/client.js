@@ -319,24 +319,19 @@ function recoverAudioOnInteraction() {
 els.onePuckButton.addEventListener("click", () => setPuckCount(1));
 els.twoPuckButton.addEventListener("click", () => setPuckCount(2));
 els.quickButton.addEventListener("click", () => {
-  void armAudioSessionFromModeButton();
   send({ type: "quick", puckCount });
   setStatus("searching");
 });
 els.createButton.addEventListener("click", () => {
-  void armAudioSessionFromModeButton();
   send({ type: "create", puckCount });
   setStatus("waitingOpponent");
 });
 els.botButton.addEventListener("click", () => {
-  void armAudioSessionFromModeButton();
   send({ type: "create", puckCount, bot: true });
   setStatus("practice");
 });
 els.joinForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  audioSessionArmed = true;
-  if (soundEnabled) void activateAudioFromGesture();
   const code = els.roomInput.value.trim().toUpperCase();
   if (code) send({ type: "join", code });
 });
@@ -1146,7 +1141,6 @@ function setUiNotice(text) {
 
 function startSelectedMode(count) {
   setPuckCount(count);
-  void armAudioSessionFromModeButton();
   if (pendingStartMode === "bot") {
     clearRoomUrl();
     send({ type: "create", puckCount: count, bot: true });
