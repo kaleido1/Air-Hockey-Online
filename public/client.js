@@ -1471,22 +1471,19 @@ function drawMainMenu(interactive) {
   const labels = [t("mainSingle"), t("mainLocal"), t("mainWireless"), t("mainOnline")];
   const actions = [
     () => {
-      audioSessionArmed = true;
-      if (soundEnabled) void activateAudioFromGesture();
+      void armAudioSessionFromModeButton();
       clearRoomUrl();
       pendingStartMode = "bot";
       showUi("puck");
     },
     () => {
-      audioSessionArmed = true;
-      if (soundEnabled) void activateAudioFromGesture();
+      void armAudioSessionFromModeButton();
       clearRoomUrl();
       pendingStartMode = "local";
       showUi("puck");
     },
     () => {
-      audioSessionArmed = true;
-      if (soundEnabled) void activateAudioFromGesture();
+      void armAudioSessionFromModeButton();
       if (roomCode) {
         send({ type: "leaveToMenu" });
         clearRoom();
@@ -1496,8 +1493,7 @@ function drawMainMenu(interactive) {
       showUi("puck");
     },
     () => {
-      audioSessionArmed = true;
-      if (soundEnabled) void activateAudioFromGesture();
+      void armAudioSessionFromModeButton();
       if (returnToActiveOnlineRoom()) return;
       pendingStartMode = "online";
       showUi("online");
