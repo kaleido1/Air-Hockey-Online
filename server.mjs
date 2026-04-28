@@ -1859,7 +1859,7 @@ function centerMallets(state) {
 }
 
 function getMalletStart(index) {
-  const goalFrontOffset = TABLE.malletRadius + 84;
+  const goalFrontOffset = TABLE.malletRadius + 34;
   return {
     x: TABLE.width / 2,
     y: index === 0 ? TABLE.height - goalFrontOffset : goalFrontOffset

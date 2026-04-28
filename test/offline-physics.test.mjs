@@ -1,0 +1,150 @@
+import assert from "node:assert/strict";
+import {
+  chooseSafeServePosition,
+  detectGoalCrossing,
+  getMalletStart,
+  getServeAnchorY,
+  resolveSweptPuckMalletContact
+} from "../public/offline-physics.js";
+
+const TABLE = {
+  width: 590,
+  height: 1024,
+  goalWidth: 178,
+  malletRadius: 54,
+  puckRadius: 29,
+  firstTo: 7
+};
+
+const CONFIG = {
+  blockReleaseSpeed: 180,
+  contactSeparation: 0.12,
+  contactSlop: 1.4,
+  hardContactSeparation: 1.0,
+  malletTransfer: 0.62,
+  rehitSuppressionMs: 45,
+  restitution: 0.8
+};
+
+function testMalletStartsNearOwnGoals() {
+  const offset = TABLE.malletRadius + 34;
+  const bottom = getMalletStart(TABLE, 0, offset);
+  const top = getMalletStart(TABLE, 1, offset);
+
+  assert.equal(bottom.x, TABLE.width / 2);
+  assert.equal(top.x, TABLE.width / 2);
+  assert.ok(bottom.y > TABLE.height - TABLE.malletRadius - 45);
+  assert.ok(top.y < TABLE.malletRadius + 45);
+}
+
+function testServeAvoidsMallets() {
+  const offset = TABLE.malletRadius + 34;
+  const state = {
+    mallets: [getMalletStart(TABLE, 0, offset), getMalletStart(TABLE, 1, offset)],
+    pucks: []
+  };
+  const server = 0;
+  const position = chooseSafeServePosition(
+    TABLE,
+    CONFIG,
+    state,
+    TABLE.width / 2,
+    getServeAnchorY(TABLE, server),
+    server
+  );
+  const minDistance = TABLE.malletRadius + TABLE.puckRadius + CONFIG.contactSeparation + 12;
+
+  for (const mallet of state.mallets) {
+    assert.ok(Math.hypot(position.x - mallet.x, position.y - mallet.y) >= minDistance);
+  }
+}
+
+function testFastMalletSweepHitsStaticPuck() {
+  const puck = {
+    id: "p0",
+    prevX: 295,
+    prevY: 512,
+    x: 295,
+    y: 512,
+    vx: 0,
+    vy: 0,
+    lastMalletHitIndex: null,
+    lastMalletHitAt: 0
+  };
+  const mallet = {
+    physicsPrevX: 120,
+    physicsPrevY: 512,
+    x: 470,
+    y: 512,
+    vx: 5200,
+    vy: 0
+  };
+  const result = resolveSweptPuckMalletContact(TABLE, CONFIG, puck, mallet, 0, 1000);
+
+  assert.ok(result, "fast sweep should hit the static puck");
+  assert.ok(Math.hypot(result.x - mallet.x, result.y - mallet.y) >= TABLE.malletRadius + TABLE.puckRadius);
+  assert.ok(Math.hypot(result.vx, result.vy) >= CONFIG.blockReleaseSpeed);
+}
+
+function testFastPuckCannotTunnelThroughStationaryMallet() {
+  const puck = {
+    id: "p0",
+    prevX: 295,
+    prevY: 760,
+    x: 295,
+    y: 965,
+    vx: 0,
+    vy: 2600,
+    lastMalletHitIndex: null,
+    lastMalletHitAt: 0
+  };
+  const mallet = {
+    physicsPrevX: 295,
+    physicsPrevY: 900,
+    x: 295,
+    y: 900,
+    vx: 0,
+    vy: 0
+  };
+  const result = resolveSweptPuckMalletContact(TABLE, CONFIG, puck, mallet, 0, 1000);
+
+  assert.ok(result, "fast puck should collide with the stationary mallet it crosses");
+  assert.ok(result.vy < 0, "bottom mallet should send the puck back upward");
+  assert.ok(result.y < mallet.y, "puck should be separated on the impact side");
+}
+
+function testGoalScoredWhenPuckCrossesLineBetweenFrames() {
+  const topGoal = {
+    prevX: TABLE.width / 2,
+    prevY: 34,
+    x: TABLE.width / 2,
+    y: -48,
+    vx: 0,
+    vy: -1500
+  };
+  const bottomGoal = {
+    prevX: TABLE.width / 2,
+    prevY: TABLE.height - 34,
+    x: TABLE.width / 2,
+    y: TABLE.height + 48,
+    vx: 0,
+    vy: 1500
+  };
+
+  assert.equal(detectGoalCrossing(TABLE, topGoal), 0);
+  assert.equal(detectGoalCrossing(TABLE, bottomGoal), 1);
+}
+
+const tests = [
+  testMalletStartsNearOwnGoals,
+  testServeAvoidsMallets,
+  testFastMalletSweepHitsStaticPuck,
+  testFastPuckCannotTunnelThroughStationaryMallet,
+  testGoalScoredWhenPuckCrossesLineBetweenFrames
+];
+
+for (const test of tests) {
+  test();
+}
+
+console.log(`offline physics tests passed: ${tests.length}`);

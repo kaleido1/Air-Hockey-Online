@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "node server.mjs",
     "start": "node server.mjs",
-    "check": "node --check server.mjs && node --check public/client.js"
+    "check": "node --check server.mjs && node --check public/client.js && node --check public/offline-physics.js",
+    "test": "node test/offline-physics.test.mjs"
   },
   "dependencies": {
     "matter-js": "^0.20.0",
