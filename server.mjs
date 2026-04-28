@@ -105,6 +105,23 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (pathname === "/vendor/matter.min.js") {
+    const matterPath = path.join(__dirname, "node_modules", "matter-js", "build", "matter.min.js");
+    fs.readFile(matterPath, (err, data) => {
+      if (err) {
+        res.writeHead(404);
+        res.end("Not found");
+        return;
+      }
+      res.writeHead(200, {
+        "Content-Type": "text/javascript; charset=utf-8",
+        "Cache-Control": "no-store"
+      });
+      res.end(data);
+    });
+    return;
+  }
+
   const filePath = path.normalize(path.join(publicDir, pathname));
   if (!filePath.startsWith(publicDir)) {
     res.writeHead(403);

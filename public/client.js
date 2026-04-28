@@ -252,6 +252,7 @@ let gameoverReturnTimer = 0;
 let audioKeepAliveSource = null;
 let audioKeepAliveGain = null;
 let audioUnlockElement = null;
+let offlineGame = null;
 const activePointers = new Map();
 const touchCapable = navigator.maxTouchPoints > 0 || "ontouchstart" in window;
 let lastCenterTapAt = 0;
@@ -279,6 +280,9 @@ const LOCAL_BLOCK_RELEASE_SPEED = 180;
 const LOCAL_WALL_RESTITUTION = 0.94;
 const LOCAL_FRICTION_PER_SECOND = 0.991;
 const LOCAL_PUCK_MAX_SPEED = 2600;
+const OFFLINE_PHYSICS_HZ = 180;
+const OFFLINE_DT = 1 / OFFLINE_PHYSICS_HZ;
+const OFFLINE_MAX_FRAME_MS = 60;
 const ENABLE_LOCAL_PUCK_PREDICTION = true;
 const puckCorrections = new Map();
 const localPredictedPucks = new Map();
@@ -375,21 +379,25 @@ function recoverAudioOnInteraction() {
 els.onePuckButton.addEventListener("click", () => setPuckCount(1));
 els.twoPuckButton.addEventListener("click", () => setPuckCount(2));
 els.quickButton.addEventListener("click", () => {
+  stopOfflineGame();
   send({ type: "quick", puckCount });
   setStatus("searching");
 });
 els.createButton.addEventListener("click", () => {
+  stopOfflineGame();
   send({ type: "create", puckCount });
   setStatus("waitingOpponent");
 });
 els.botButton.addEventListener("click", () => {
-  send({ type: "create", puckCount, bot: true });
-  setStatus("practice");
+  startOfflineGame("bot", puckCount);
 });
 els.joinForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const code = els.roomInput.value.trim().toUpperCase();
-  if (code) send({ type: "join", code });
+  if (code) {
+    stopOfflineGame();
+    send({ type: "join", code });
+  }
 });
 els.copyButton.addEventListener("click", async () => {
   if (!shouldExposeRoomInUrl()) return;
@@ -402,9 +410,15 @@ els.copyButton.addEventListener("click", async () => {
     setStatus(roomCode);
   }
 });
-els.restartButton.addEventListener("click", () => send({ type: "restart" }));
+els.restartButton.addEventListener("click", () => {
+  if (offlineGame) {
+    restartOfflineGame();
+    return;
+  }
+  send({ type: "restart" });
+});
 els.leaveButton.addEventListener("click", () => {
-  send({ type: "leave" });
+  if (!offlineGame) send({ type: "leave" });
   clearRoom();
 });
 
@@ -488,6 +502,10 @@ window.addEventListener("keydown", (event) => {
     if (!roomCode || !serverState || !["playing", "paused"].includes(serverState.phase)) return;
     event.preventDefault();
     unlockAudio();
+    if (offlineGame) {
+      toggleOfflinePause();
+      return;
+    }
     send({ type: "pause" });
     return;
   }
@@ -506,7 +524,7 @@ function connect() {
     connected = true;
     els.connectionStatus.textContent = t("online");
     setButtons();
-    if (roomCode && playerIndex !== null) {
+    if (!offlineGame && roomCode && playerIndex !== null) {
       send({ type: "join", code: roomCode, preferredIndex: playerIndex });
       setStatus("rejoining");
     }
@@ -526,7 +544,7 @@ function connect() {
     connected = false;
     clearTimeout(heartbeatTimer);
     els.connectionStatus.textContent = t("offline");
-    setStatus("reconnecting");
+    if (!offlineGame) setStatus("reconnecting");
     setButtons();
     reconnectTimer = setTimeout(connect, 900);
   });
@@ -874,16 +892,418 @@ function setStatus(text) {
 }
 
 function setButtons() {
-  const inRoom = Boolean(roomCode);
+  const inRoom = Boolean(roomCode || offlineGame);
   els.quickButton.disabled = !connected;
   els.createButton.disabled = !connected;
-  els.botButton.disabled = !connected;
+  els.botButton.disabled = false;
   els.copyButton.disabled = !shouldExposeRoomInUrl();
   els.restartButton.disabled = !inRoom || playerIndex !== 0;
   els.leaveButton.disabled = !inRoom;
 }
 
+function startOfflineGame(mode, count = puckCount) {
+  stopOfflineGame();
+  clearControls();
+  const MatterLib = window.Matter;
+  if (!MatterLib?.Engine || !MatterLib?.Bodies || !MatterLib?.Composite || !MatterLib?.Body) {
+    setUiNotice("Matter.js unavailable");
+    return;
+  }
+
+  const engine = MatterLib.Engine.create({ enableSleeping: false });
+  engine.gravity.y = 0;
+  engine.gravity.x = 0;
+  const puckTotal = count === 2 ? 2 : 1;
+  const state = {
+    phase: "countdown",
+    phaseEndsAt: performance.now() + 700,
+    phaseEndsInMs: 700,
+    scores: [0, 0],
+    lastScorer: null,
+    winner: null,
+    mallets: [
+      { x: TABLE.width / 2, y: TABLE.height * 0.78, vx: 0, vy: 0 },
+      { x: TABLE.width / 2, y: TABLE.height * 0.22, vx: 0, vy: 0 }
+    ],
+    pucks: []
+  };
+  const game = {
+    active: true,
+    mode,
+    engine,
+    bodies: new Map(),
+    accumulatorMs: 0,
+    lastFrameAt: performance.now(),
+    state,
+    puckCount: puckTotal,
+    botSeed: Math.random() * 1000
+  };
+  offlineGame = game;
+  addOfflineMatterWalls(game);
+  resetOfflinePucks(null);
+
+  playerIndex = 0;
+  roomCode = mode === "bot" ? "PRACTICE" : "LOCAL";
+  roomSettings = {
+    puckCount: puckTotal,
+    firstTo: TABLE.firstTo,
+    quick: false,
+    lan: false,
+    local: mode === "local",
+    bot: mode === "bot"
+  };
+  roomPlayers = [
+    { connected: true, bot: false, local: true },
+    { connected: true, bot: mode === "bot", local: mode === "local" }
+  ];
+  serverState = state;
+  previousState = null;
+  stateSnapshots.length = 0;
+  predictedMallets.clear();
+  puckCorrections.clear();
+  localPredictedPucks.clear();
+  lastPhase = "countdown";
+  phaseChangedAt = performance.now();
+  lastStateReceivedAt = performance.now();
+  setPuckCount(puckTotal, false);
+  setStatus(mode === "bot" ? "practice" : "");
+  showUi(null);
+  updateRoomLabels({ code: roomCode, players: roomPlayers });
+  updateScoreboard({ players: roomPlayers });
+}
+
+function stopOfflineGame() {
+  if (!offlineGame) return;
+  const MatterLib = window.Matter;
+  if (MatterLib?.Composite) MatterLib.Composite.clear(offlineGame.engine.world, false);
+  if (MatterLib?.Engine) MatterLib.Engine.clear(offlineGame.engine);
+  offlineGame = null;
+}
+
+function restartOfflineGame() {
+  if (!offlineGame) return;
+  const mode = offlineGame.mode;
+  const count = offlineGame.puckCount;
+  startOfflineGame(mode, count);
+}
+
+function toggleOfflinePause() {
+  if (!offlineGame?.state) return;
+  if (offlineGame.state.phase === "playing") {
+    offlineGame.state.phase = "paused";
+    phaseChangedAt = performance.now();
+    setStatus("");
+  } else if (offlineGame.state.phase === "paused") {
+    offlineGame.state.phase = "countdown";
+    offlineGame.state.phaseEndsAt = performance.now() + 700;
+    phaseChangedAt = performance.now();
+    setStatus("");
+  }
+}
+
+function addOfflineMatterWalls(game) {
+  const MatterLib = window.Matter;
+  MatterLib.Composite.add(game.engine.world, createMatterWallBodies(MatterLib));
+}
+
+function createMatterWallBodies(MatterLib) {
+  const t = 90;
+  const goalLeft = TABLE.width / 2 - TABLE.goalWidth / 2;
+  const goalRight = TABLE.width / 2 + TABLE.goalWidth / 2;
+  const wallOptions = {
+    isStatic: true,
+    restitution: LOCAL_WALL_RESTITUTION,
+    friction: 0,
+    frictionStatic: 0,
+    label: "wall"
+  };
+  return [
+    MatterLib.Bodies.rectangle(-t / 2, TABLE.height / 2, t, TABLE.height + t * 2, wallOptions),
+    MatterLib.Bodies.rectangle(TABLE.width + t / 2, TABLE.height / 2, t, TABLE.height + t * 2, wallOptions),
+    MatterLib.Bodies.rectangle(goalLeft / 2, -t / 2, goalLeft, t, wallOptions),
+    MatterLib.Bodies.rectangle(goalRight + (TABLE.width - goalRight) / 2, -t / 2, TABLE.width - goalRight, t, wallOptions),
+    MatterLib.Bodies.rectangle(goalLeft / 2, TABLE.height + t / 2, goalLeft, t, wallOptions),
+    MatterLib.Bodies.rectangle(
+      goalRight + (TABLE.width - goalRight) / 2,
+      TABLE.height + t / 2,
+      TABLE.width - goalRight,
+      t,
+      wallOptions
+    )
+  ];
+}
+
+function resetOfflinePucks(scorer) {
+  if (!offlineGame) return;
+  const MatterLib = window.Matter;
+  for (const body of offlineGame.bodies.values()) {
+    MatterLib.Composite.remove(offlineGame.engine.world, body);
+  }
+  offlineGame.bodies.clear();
+  offlineGame.state.pucks = [];
+  const server = scorer === 0 ? 1 : scorer === 1 ? 0 : Math.random() > 0.5 ? 0 : 1;
+  const serveY = server === 0 ? TABLE.height * 0.64 : TABLE.height * 0.36;
+  for (let index = 0; index < offlineGame.puckCount; index += 1) {
+    const offset = offlineGame.puckCount === 1 ? 0 : index === 0 ? -58 : 58;
+    const puck = {
+      id: `p${index}`,
+      x: TABLE.width / 2 + offset,
+      y: serveY + (offlineGame.puckCount === 1 ? 0 : index === 0 ? -18 : 18),
+      vx: 0,
+      vy: 0,
+      lastMalletHitIndex: null,
+      hitSerial: 0
+    };
+    const body = MatterLib.Bodies.circle(puck.x, puck.y, TABLE.puckRadius, {
+      restitution: LOCAL_WALL_RESTITUTION,
+      friction: 0,
+      frictionStatic: 0,
+      frictionAir: 0,
+      label: puck.id
+    });
+    MatterLib.Composite.add(offlineGame.engine.world, body);
+    offlineGame.bodies.set(puck.id, body);
+    offlineGame.state.pucks.push(puck);
+  }
+}
+
+function updateOfflineMalletInput(index, point, previousInputAt, now) {
+  if (!offlineGame?.state || index !== 0 && index !== 1) return;
+  const state = offlineGame.state;
+  let constrained = constrainForPlayer(index, point.x, point.y);
+  if (state.phase !== "playing") {
+    constrained = constrainMalletAwayFromPucks(index, constrained.x, constrained.y, state.pucks || []);
+  }
+  const mallet = state.mallets[index];
+  const fromX = mallet.x;
+  const fromY = mallet.y;
+  const inputDt = clamp((now - previousInputAt) / 1000, 1 / 240, 1 / 24);
+  mallet.x = constrained.x;
+  mallet.y = constrained.y;
+  mallet.vx = (constrained.x - fromX) / inputDt;
+  mallet.vy = (constrained.y - fromY) / inputDt;
+  predictedMallets.set(index, {
+    x: mallet.x,
+    y: mallet.y,
+    vx: mallet.vx,
+    vy: mallet.vy,
+    inputSeq: nextInputSeq++,
+    inputAt: now,
+    expiresAt: now + 180
+  });
+  if (state.phase === "playing") {
+    resolveOfflineMalletSweep(index, fromX, fromY, constrained.x, constrained.y, inputDt, now);
+  }
+}
+
+function resolveOfflineMalletSweep(index, fromX, fromY, toX, toY, inputDt, now) {
+  if (!offlineGame?.state) return;
+  const sweepX = toX - fromX;
+  const sweepY = toY - fromY;
+  const distance = Math.hypot(sweepX, sweepY);
+  if (distance <= 0.001) return;
+  const malletSpeed = distance / Math.max(inputDt, 1 / 240);
+  const minDistance = TABLE.malletRadius + TABLE.puckRadius;
+  const moveX = sweepX / distance;
+  const moveY = sweepY / distance;
+
+  for (const puck of offlineGame.state.pucks) {
+    if (puck.lastMalletHitIndex === index && now - (puck.lastMalletHitAt || 0) < LOCAL_REHIT_SUPPRESSION_MS) {
+      continue;
+    }
+
+    const relativeStartX = puck.x - fromX;
+    const relativeStartY = puck.y - fromY;
+    const relativeStartDistance = Math.hypot(relativeStartX, relativeStartY);
+    const movingTowardPuck = sweepX * relativeStartX + sweepY * relativeStartY > 0;
+    let hitT = null;
+    if (relativeStartDistance <= minDistance + 0.04 && malletSpeed > 180) {
+      hitT = 0;
+    } else if (movingTowardPuck) {
+      hitT = findEarliestSweepContact(relativeStartX, relativeStartY, -sweepX, -sweepY, minDistance, 0.04);
+    }
+    if (hitT === null) continue;
+
+    const contactMalletX = fromX + sweepX * hitT;
+    const contactMalletY = fromY + sweepY * hitT;
+    let normalX = puck.x - contactMalletX;
+    let normalY = puck.y - contactMalletY;
+    let normalLength = Math.hypot(normalX, normalY);
+    if (normalLength <= 0.001) {
+      normalX = sweepX || 1;
+      normalY = sweepY || 0;
+      normalLength = Math.hypot(normalX, normalY) || 1;
+    }
+    normalX /= normalLength;
+    normalY /= normalLength;
+
+    const puckSpeed = Math.hypot(puck.vx || 0, puck.vy || 0);
+    const staticKick = puckSpeed < 70 ? 520 : 0;
+    const sweepKick = staticKick > 0 && malletSpeed > 260 ? 460 : 0;
+    let exitX = normalX;
+    let exitY = normalY;
+    if (sweepKick > 0) {
+      let blendedX = normalX * 0.55 + moveX * 0.82;
+      let blendedY = normalY * 0.55 + moveY * 0.82;
+      if (blendedX * normalX + blendedY * normalY < 0.25) {
+        blendedX += normalX * 0.75;
+        blendedY += normalY * 0.75;
+      }
+      const blendedLength = Math.hypot(blendedX, blendedY) || 1;
+      exitX = blendedX / blendedLength;
+      exitY = blendedY / blendedLength;
+    }
+
+    const strike = Math.min(LOCAL_PUCK_MAX_SPEED, Math.max(staticKick, 180 + malletSpeed * 0.12));
+    puck.x = contactMalletX + exitX * (minDistance + LOCAL_HARD_CONTACT_SEPARATION);
+    puck.y = contactMalletY + exitY * (minDistance + LOCAL_HARD_CONTACT_SEPARATION);
+    puck.vx = exitX * strike + moveX * sweepKick + sweepX * 9.5;
+    puck.vy = exitY * strike + moveY * sweepKick + sweepY * 9.5;
+    capLocalPredictedPuckSpeed(puck);
+    puck.lastMalletHitIndex = index;
+    puck.lastMalletHitAt = now;
+    puck.hitSerial = ((puck.hitSerial || 0) + 1) & 0xff;
+    syncOfflinePuckBody(puck);
+    lastLocalHitFxAt = now;
+    playFx("hit", Math.min(1, strike / 900));
+  }
+}
+
+function syncOfflinePuckBody(puck) {
+  if (!offlineGame) return;
+  const MatterLib = window.Matter;
+  const body = offlineGame.bodies.get(puck.id);
+  if (!body || !MatterLib?.Body) return;
+  MatterLib.Body.setPosition(body, { x: puck.x, y: puck.y });
+  MatterLib.Body.setVelocity(body, { x: (puck.vx || 0) / 60, y: (puck.vy || 0) / 60 });
+}
+
+function stepOfflineGame(frameTime) {
+  if (!offlineGame?.state) return;
+  const state = offlineGame.state;
+  const now = performance.now();
+  const elapsed = Math.min(OFFLINE_MAX_FRAME_MS, Math.max(0, frameTime - offlineGame.lastFrameAt));
+  offlineGame.lastFrameAt = frameTime;
+
+  if (state.phase === "countdown" && now >= state.phaseEndsAt) {
+    state.phase = "playing";
+    state.phaseEndsAt = 0;
+    phaseChangedAt = now;
+    setStatus("");
+  } else if (state.phase === "point" && now >= state.phaseEndsAt) {
+    resetOfflinePucks(state.lastScorer);
+    state.phase = "playing";
+    state.phaseEndsAt = 0;
+    phaseChangedAt = now;
+    setStatus("");
+  }
+
+  if (state.phase === "playing") {
+    offlineGame.accumulatorMs += elapsed;
+    while (offlineGame.accumulatorMs >= 1000 / OFFLINE_PHYSICS_HZ) {
+      if (offlineGame.mode === "bot") updateOfflineBot(OFFLINE_DT, now);
+      stepOfflineMatterWorld(OFFLINE_DT);
+      offlineGame.accumulatorMs -= 1000 / OFFLINE_PHYSICS_HZ;
+    }
+  }
+
+  serverState = state;
+  lastStateReceivedAt = now;
+  updateScoreboard({ players: roomPlayers });
+}
+
+function stepOfflineMatterWorld(dt) {
+  if (!offlineGame) return;
+  const MatterLib = window.Matter;
+  for (const puck of offlineGame.state.pucks) {
+    puck.vx *= Math.pow(LOCAL_FRICTION_PER_SECOND, dt);
+    puck.vy *= Math.pow(LOCAL_FRICTION_PER_SECOND, dt);
+    capLocalPredictedPuckSpeed(puck);
+    syncOfflinePuckBody(puck);
+  }
+
+  MatterLib.Engine.update(offlineGame.engine, 1000 / OFFLINE_PHYSICS_HZ);
+
+  const scored = [];
+  for (const puck of offlineGame.state.pucks) {
+    const body = offlineGame.bodies.get(puck.id);
+    if (!body) continue;
+    puck.x = body.position.x;
+    puck.y = body.position.y;
+    puck.vx = body.velocity.x * 60;
+    puck.vy = body.velocity.y * 60;
+    capLocalPredictedPuckSpeed(puck);
+    const scorer = detectOfflineGoal(puck);
+    if (scorer !== null) scored.push(scorer);
+  }
+  if (scored.length > 0) awardOfflineScoredPucks(scored);
+}
+
+function detectOfflineGoal(puck) {
+  const goalLeft = TABLE.width / 2 - TABLE.goalWidth / 2;
+  const goalRight = TABLE.width / 2 + TABLE.goalWidth / 2;
+  if (puck.x <= goalLeft || puck.x >= goalRight) return null;
+  if (puck.y < -TABLE.puckRadius) return 0;
+  if (puck.y > TABLE.height + TABLE.puckRadius) return 1;
+  return null;
+}
+
+function awardOfflineScoredPucks(scorers) {
+  if (!offlineGame || offlineGame.state.phase === "gameover") return;
+  const state = offlineGame.state;
+  let lastScorer = null;
+  for (const scorer of scorers) {
+    state.scores[scorer] = Math.min(TABLE.firstTo, state.scores[scorer] + 1);
+    lastScorer = scorer;
+  }
+  state.lastScorer = lastScorer;
+  playFx("score", 1);
+  if (state.scores[lastScorer] >= TABLE.firstTo) {
+    state.phase = "gameover";
+    state.winner = lastScorer;
+    phaseChangedAt = performance.now();
+    scheduleGameoverReturn();
+    return;
+  }
+  state.phase = "point";
+  state.phaseEndsAt = performance.now() + 900;
+  phaseChangedAt = performance.now();
+  setStatus("goal");
+}
+
+function updateOfflineBot(dt, now) {
+  const state = offlineGame.state;
+  const mallet = state.mallets[1];
+  const targetPuck =
+    state.pucks
+      .filter((puck) => puck.y < TABLE.height * 0.58 || puck.vy < -80)
+      .sort((a, b) => a.y - b.y)[0] || state.pucks[0];
+  if (!targetPuck) return;
+
+  const guardY = TABLE.height * 0.24;
+  const attackY = Math.max(TABLE.malletRadius + 12, targetPuck.y - TABLE.puckRadius - TABLE.malletRadius + 12);
+  const target = {
+    x: clamp(
+      targetPuck.x + Math.sin(now / 180 + offlineGame.botSeed) * 26,
+      TABLE.malletRadius,
+      TABLE.width - TABLE.malletRadius
+    ),
+    y: clamp(targetPuck.y < TABLE.height * 0.46 ? attackY : guardY, TABLE.malletRadius, TABLE.height / 2 - TABLE.malletRadius * 0.28)
+  };
+  const dx = target.x - mallet.x;
+  const dy = target.y - mallet.y;
+  const distance = Math.hypot(dx, dy);
+  if (distance <= 0.001) return;
+  const speed = targetPuck.y < TABLE.height * 0.48 ? 3900 : 2850;
+  const maxMove = speed * dt;
+  const toX = distance > maxMove ? mallet.x + (dx / distance) * maxMove : target.x;
+  const toY = distance > maxMove ? mallet.y + (dy / distance) * maxMove : target.y;
+  const previousAt = now - dt * 1000;
+  updateOfflineMalletInput(1, { x: toX, y: toY }, previousAt, now);
+}
+
 function clearRoom() {
+  stopOfflineGame();
   if (gameoverReturnTimer) {
     clearTimeout(gameoverReturnTimer);
     gameoverReturnTimer = 0;
@@ -1008,6 +1428,31 @@ function localPuckPredictionWindowMs() {
 function advanceLocalPuckPrediction(prediction, now) {
   const lastUpdatedAt = prediction.updatedAt || prediction.startedAt || now;
   let remaining = clamp((now - lastUpdatedAt) / 1000, 0, 0.12);
+  if (ensurePredictionMatterBody(prediction)) {
+    const MatterLib = window.Matter;
+    while (remaining > 0.000001) {
+      const dt = Math.min(remaining, LOCAL_PREDICTION_MAX_STEP);
+      const velocity = prediction.matterBody.velocity;
+      MatterLib.Body.setVelocity(prediction.matterBody, {
+        x: velocity.x * Math.pow(LOCAL_FRICTION_PER_SECOND, dt),
+        y: velocity.y * Math.pow(LOCAL_FRICTION_PER_SECOND, dt)
+      });
+      MatterLib.Engine.update(prediction.matterEngine, dt * 1000);
+      remaining -= dt;
+    }
+    prediction.x = prediction.matterBody.position.x;
+    prediction.y = prediction.matterBody.position.y;
+    prediction.vx = prediction.matterBody.velocity.x * 60;
+    prediction.vy = prediction.matterBody.velocity.y * 60;
+    capLocalPredictedPuckSpeed(prediction);
+    MatterLib.Body.setVelocity(prediction.matterBody, {
+      x: (prediction.vx || 0) / 60,
+      y: (prediction.vy || 0) / 60
+    });
+    prediction.updatedAt = now;
+    return prediction;
+  }
+
   while (remaining > 0.000001) {
     const dt = Math.min(remaining, LOCAL_PREDICTION_MAX_STEP);
     prediction.vx *= Math.pow(LOCAL_FRICTION_PER_SECOND, dt);
@@ -1020,6 +1465,27 @@ function advanceLocalPuckPrediction(prediction, now) {
   }
   prediction.updatedAt = now;
   return prediction;
+}
+
+function ensurePredictionMatterBody(prediction) {
+  if (prediction.matterBody && prediction.matterEngine) return true;
+  const MatterLib = window.Matter;
+  if (!MatterLib?.Engine || !MatterLib?.Bodies || !MatterLib?.Composite || !MatterLib?.Body) return false;
+  const engine = MatterLib.Engine.create({ enableSleeping: false });
+  engine.gravity.y = 0;
+  engine.gravity.x = 0;
+  const body = MatterLib.Bodies.circle(prediction.x, prediction.y, TABLE.puckRadius, {
+    restitution: LOCAL_WALL_RESTITUTION,
+    friction: 0,
+    frictionStatic: 0,
+    frictionAir: 0,
+    label: "predicted-puck"
+  });
+  MatterLib.Body.setVelocity(body, { x: (prediction.vx || 0) / 60, y: (prediction.vy || 0) / 60 });
+  MatterLib.Composite.add(engine.world, [...createMatterWallBodies(MatterLib), body]);
+  prediction.matterEngine = engine;
+  prediction.matterBody = body;
+  return true;
 }
 
 function collideLocalPredictedPuckWithWalls(puck) {
@@ -1055,7 +1521,7 @@ function capLocalPredictedPuckSpeed(puck) {
 
 function sendPointer(event, force, overridePlayerIndex = null) {
   if (!isActivePlay()) return;
-  if (!roomCode || playerIndex === null) return;
+  if ((!roomCode && !offlineGame) || playerIndex === null) return;
   const point = eventToTable(event);
   if (!point) return;
   const targetIndex = overridePlayerIndex === 0 || overridePlayerIndex === 1 ? overridePlayerIndex : playerIndex;
@@ -1064,7 +1530,7 @@ function sendPointer(event, force, overridePlayerIndex = null) {
 
 function sendRelativePointer(event, force, targetIndex) {
   if (!isActivePlay()) return;
-  if (!roomCode || playerIndex === null) return;
+  if ((!roomCode && !offlineGame) || playerIndex === null) return;
   if (!event.movementX && !event.movementY && !force) return;
   const base =
     predictedMallets.get(targetIndex) ||
@@ -1084,12 +1550,16 @@ function sendRelativePointer(event, force, targetIndex) {
 
 function sendPointerFromPoint(point, force, targetIndex) {
   if (!isActivePlay()) return;
-  if (!roomCode || playerIndex === null) return;
+  if ((!roomCode && !offlineGame) || playerIndex === null) return;
   const now = performance.now();
   const inputIntervalMs = 1000 / 180;
   const previousInputAt = lastInputAtByPlayer[targetIndex] || now - 1000 / 120;
   if (!force && now - lastInputAtByPlayer[targetIndex] < inputIntervalMs) return;
   lastInputAtByPlayer[targetIndex] = now;
+  if (offlineGame) {
+    updateOfflineMalletInput(targetIndex, point, previousInputAt, now);
+    return;
+  }
   const inputSeq = nextInputSeq++;
   let constrained = constrainForPlayer(targetIndex, point.x, point.y);
   if (serverState?.phase !== "playing") {
@@ -1429,21 +1899,19 @@ function startSelectedMode(count) {
   setPuckCount(count);
   if (pendingStartMode === "bot") {
     clearRoomUrl();
-    send({ type: "create", puckCount: count, bot: true });
-    setStatus("practice");
-    showUi(null);
+    startOfflineGame("bot", count);
   } else if (pendingStartMode === "local") {
     clearRoomUrl();
-    send({ type: "local", puckCount: count });
-    setStatus("");
-    showUi(null);
+    startOfflineGame("local", count);
   } else if (pendingStartMode === "lan") {
     clearRoomUrl();
+    stopOfflineGame();
     send({ type: "lan", puckCount: count });
     setStatus("waitingOtherPlayer");
     showUi("waiting");
   } else if (pendingStartMode === "online") {
     clearRoomUrl();
+    stopOfflineGame();
     if (pendingRoomFromUrl) {
       send({ type: "join", code: pendingRoomFromUrl });
     } else {
@@ -1460,6 +1928,7 @@ function joinOnlineRoom() {
   const code = String(rawCode || "").trim().toUpperCase();
   if (!code) return;
   clearRoomUrl();
+  stopOfflineGame();
   send({ type: "join", code });
   setStatus("waitingOpponent");
   showUi("waiting");
@@ -1477,7 +1946,7 @@ function runWithSoundGate(action) {
 function isActivePlay() {
   return Boolean(
     !uiScreen &&
-    roomCode &&
+    (roomCode || offlineGame) &&
       playerIndex !== null &&
       serverState &&
       ["playing", "countdown", "point"].includes(serverState.phase)
@@ -1485,7 +1954,7 @@ function isActivePlay() {
 }
 
 function isLocalGame() {
-  return Boolean(roomSettings?.local);
+  return Boolean(roomSettings?.local || offlineGame?.mode === "local");
 }
 
 function isOnlineRoom() {
@@ -1590,6 +2059,7 @@ function rememberStateSnapshot(message) {
 
 function renderState() {
   if (!serverState) return null;
+  if (offlineGame) return serverState;
   if (serverState.phase !== "playing" || stateSnapshots.length < 2) return serverState;
 
   const newest = stateSnapshots[stateSnapshots.length - 1];
@@ -1797,6 +2267,7 @@ function render(frameTime = performance.now()) {
     if (renderBudgetMs + 0.25 < targetFrameMs) return;
     renderBudgetMs %= targetFrameMs;
   }
+  if (offlineGame) stepOfflineGame(frameTime);
   const state = renderState() || demoState();
   const nextCursor = isActivePlay() ? "none" : "default";
   if (currentCursor !== nextCursor) {
