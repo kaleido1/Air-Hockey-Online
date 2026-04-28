@@ -1197,7 +1197,7 @@ function joinOnlineRoom() {
 }
 
 function runWithSoundGate(action) {
-  if (audioSessionArmed) {
+  if (!isIOS || audioSessionArmed) {
     action();
     return;
   }
