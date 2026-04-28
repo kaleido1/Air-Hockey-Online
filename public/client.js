@@ -680,6 +680,7 @@ function getInitialLanguage() {
 }
 
 function getInitialSoundEnabled() {
+  if (isIOS) return false;
   try {
     const saved = localStorage.getItem(SOUND_ENABLED_STORAGE_KEY);
     if (saved === "false") return false;
@@ -691,6 +692,7 @@ function getInitialSoundEnabled() {
 }
 
 function persistSoundEnabled() {
+  if (isIOS) return;
   try {
     localStorage.setItem(SOUND_ENABLED_STORAGE_KEY, String(soundEnabled));
   } catch {
