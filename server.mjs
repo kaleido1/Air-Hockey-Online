@@ -367,14 +367,7 @@ function joinLanRoom(client, puckCount) {
     return;
   }
 
-  const waitingLanRoom = findWaitingLanRoom(client.networkKey);
-  if (waitingLanRoom && waitingLanRoom.settings.puckCount !== puckCount) {
-    send(client, { type: "error", message: "wirelessPuckMismatch", returnToMenu: true });
-    return;
-  }
-
   const room =
-    waitingLanRoom ||
     findOpenLanRoom(puckCount, client.networkKey) ||
     makeRoom({ puckCount, lan: true, lanNetworkKey: client.networkKey });
 
@@ -387,19 +380,6 @@ function joinLanRoom(client, puckCount) {
   const slot = reconnectSlot >= 0 ? reconnectSlot : room.players[0] ? 1 : 0;
   addPlayer(room, client, slot);
   if (canStartRoom(room)) startRoom(room);
-}
-
-function findWaitingLanRoom(networkKey) {
-  let oldestRoom = null;
-  for (const room of rooms.values()) {
-    if (!room.settings.lan) continue;
-    if (room.lanNetworkKey && room.lanNetworkKey !== networkKey) continue;
-    if (room.state.phase !== "waiting") continue;
-    const humans = room.players.filter((player) => player && !player.bot);
-    if (humans.length !== 1) continue;
-    if (!oldestRoom || room.createdAt < oldestRoom.createdAt) oldestRoom = room;
-  }
-  return oldestRoom;
 }
 
 function findLanReconnectRoom(client) {
