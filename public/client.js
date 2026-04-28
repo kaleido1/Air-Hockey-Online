@@ -239,6 +239,8 @@ let localPointerMalletIndex = 0;
 let lastPhase = null;
 let phaseChangedAt = performance.now();
 let gameoverReturnTimer = 0;
+let audioKeepAliveSource = null;
+let audioKeepAliveGain = null;
 const activePointers = new Map();
 const touchCapable = navigator.maxTouchPoints > 0 || "ontouchstart" in window;
 let lastCenterTapAt = 0;
@@ -1730,7 +1732,10 @@ function drawPauseOverlay() {
   addButton({ x: 62, y: 686, w: 172, h: 150 }, () => {
     soundEnabled = !soundEnabled;
     persistSoundEnabled();
-    if (!soundEnabled && audio) audio.suspend();
+    if (!soundEnabled) {
+      stopAudioKeepAlive();
+      if (audio) audio.suspend();
+    }
     if (soundEnabled) void enableSoundFromGesture();
   });
 }
@@ -2543,6 +2548,7 @@ function markAudioForTouchReactivate() {
 
 function resetAudioContext() {
   const oldAudio = audio;
+  stopAudioKeepAlive();
   audio = null;
   audioMasterGain = null;
   audioPrimed = false;
@@ -2596,7 +2602,40 @@ function finishAudioActivation() {
   if (!audio || audio.state !== "running") return false;
   primeAudioActivation();
   if (!audioPrimed) primeAudioContext();
+  ensureAudioKeepAlive();
   return true;
+}
+
+function ensureAudioKeepAlive() {
+  if (!audio || !getAudioOutput() || audioKeepAliveSource) return;
+  const now = audio.currentTime;
+  audioKeepAliveGain = audio.createGain();
+  audioKeepAliveGain.gain.setValueAtTime(0.00001, now);
+  audioKeepAliveGain.connect(getAudioOutput());
+  audioKeepAliveSource = audio.createOscillator();
+  audioKeepAliveSource.type = "sine";
+  audioKeepAliveSource.frequency.setValueAtTime(1, now);
+  audioKeepAliveSource.connect(audioKeepAliveGain);
+  startSourceNow(audioKeepAliveSource, now);
+}
+
+function stopAudioKeepAlive() {
+  if (audioKeepAliveSource) {
+    try {
+      stopSourceNow(audioKeepAliveSource, 0);
+    } catch {
+      // Ignore already-stopped nodes.
+    }
+  }
+  audioKeepAliveSource = null;
+  if (audioKeepAliveGain) {
+    try {
+      audioKeepAliveGain.disconnect();
+    } catch {
+      // Ignore disconnect errors on torn-down contexts.
+    }
+  }
+  audioKeepAliveGain = null;
 }
 
 function primeAudioContext() {
