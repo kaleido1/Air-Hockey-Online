@@ -235,6 +235,7 @@ let uiTransitionStartedAt = performance.now();
 let pendingStartMode = "bot";
 let menuButtons = [];
 let soundEnabled = getInitialSoundEnabled();
+let audioSessionArmed = false;
 let localPointerMalletIndex = 0;
 let lastPhase = null;
 let phaseChangedAt = performance.now();
@@ -277,57 +278,65 @@ document.addEventListener("visibilitychange", () => {
     clearTimeout(reconnectTimer);
     connect();
   }
-  void recoverAudioContext();
+  if (audioSessionArmed && soundEnabled) void recoverAudioContext();
 });
 window.addEventListener("pagehide", markAudioForTouchReactivate, { passive: true });
 window.addEventListener("blur", markAudioForTouchReactivate, { passive: true });
 window.addEventListener("pointerdown", () => {
-  void activateAudioFromGesture();
+  void recoverAudioOnInteraction();
 }, { capture: true, passive: true });
 window.addEventListener("touchstart", () => {
-  void activateAudioFromGesture();
+  void recoverAudioOnInteraction();
 }, { capture: true, passive: true });
 window.addEventListener("touchend", () => {
-  void activateAudioFromGesture();
+  void recoverAudioOnInteraction();
 }, { capture: true, passive: true });
 window.addEventListener("mousedown", () => {
-  void activateAudioFromGesture();
+  void recoverAudioOnInteraction();
 }, { capture: true, passive: true });
 window.addEventListener("click", () => {
-  void activateAudioFromGesture();
+  void recoverAudioOnInteraction();
 }, { capture: true, passive: true });
 window.addEventListener("keydown", () => {
-  void activateAudioFromGesture();
+  void recoverAudioOnInteraction();
 }, { capture: true });
 window.addEventListener("pageshow", () => {
-  void recoverAudioContext();
+  if (audioSessionArmed && soundEnabled) void recoverAudioContext();
 }, { passive: true });
 
-function enableSoundFromGesture() {
+function armAudioSessionFromModeButton() {
+  audioSessionArmed = true;
   if (!soundEnabled) return Promise.resolve(false);
+  return activateAudioFromGesture();
+}
+
+function recoverAudioOnInteraction() {
+  if (!audioSessionArmed || !soundEnabled) return Promise.resolve(false);
+  if (!audioNeedsTouchReactivate && !audioNeedsFreshContext) return Promise.resolve(false);
   return activateAudioFromGesture();
 }
 
 els.onePuckButton.addEventListener("click", () => setPuckCount(1));
 els.twoPuckButton.addEventListener("click", () => setPuckCount(2));
 els.quickButton.addEventListener("click", () => {
-  void enableSoundFromGesture();
+  void armAudioSessionFromModeButton();
   send({ type: "quick", puckCount });
   setStatus("searching");
 });
 els.createButton.addEventListener("click", () => {
-  void enableSoundFromGesture();
+  void armAudioSessionFromModeButton();
   send({ type: "create", puckCount });
   setStatus("waitingOpponent");
 });
 els.botButton.addEventListener("click", () => {
-  void enableSoundFromGesture();
+  void armAudioSessionFromModeButton();
   send({ type: "create", puckCount, bot: true });
   setStatus("practice");
 });
 els.joinForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  void enableSoundFromGesture();
+  audioSessionArmed = true;
+  if (soundEnabled) void activateAudioFromGesture();
   const code = els.roomInput.value.trim().toUpperCase();
   if (code) send({ type: "join", code });
 });
@@ -1137,7 +1146,7 @@ function setUiNotice(text) {
 
 function startSelectedMode(count) {
   setPuckCount(count);
-  void enableSoundFromGesture();
+  void armAudioSessionFromModeButton();
   if (pendingStartMode === "bot") {
     clearRoomUrl();
     send({ type: "create", puckCount: count, bot: true });
@@ -1439,19 +1448,22 @@ function drawMainMenu(interactive) {
   const labels = [t("mainSingle"), t("mainLocal"), t("mainWireless"), t("mainOnline")];
   const actions = [
     () => {
-      void enableSoundFromGesture();
+      audioSessionArmed = true;
+      if (soundEnabled) void activateAudioFromGesture();
       clearRoomUrl();
       pendingStartMode = "bot";
       showUi("puck");
     },
     () => {
-      void enableSoundFromGesture();
+      audioSessionArmed = true;
+      if (soundEnabled) void activateAudioFromGesture();
       clearRoomUrl();
       pendingStartMode = "local";
       showUi("puck");
     },
     () => {
-      void enableSoundFromGesture();
+      audioSessionArmed = true;
+      if (soundEnabled) void activateAudioFromGesture();
       if (roomCode) {
         send({ type: "leaveToMenu" });
         clearRoom();
@@ -1461,7 +1473,8 @@ function drawMainMenu(interactive) {
       showUi("puck");
     },
     () => {
-      void enableSoundFromGesture();
+      audioSessionArmed = true;
+      if (soundEnabled) void activateAudioFromGesture();
       if (returnToActiveOnlineRoom()) return;
       pendingStartMode = "online";
       showUi("online");
@@ -1736,7 +1749,10 @@ function drawPauseOverlay() {
       stopAudioKeepAlive();
       if (audio) audio.suspend();
     }
-    if (soundEnabled) void enableSoundFromGesture();
+    if (soundEnabled) {
+      audioSessionArmed = true;
+      void activateAudioFromGesture();
+    }
   });
 }
 
