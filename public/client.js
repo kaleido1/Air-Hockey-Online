@@ -224,7 +224,6 @@ let audioUnlockPromise = null;
 let audioUnlockedByGesture = false;
 let iosAudio = null;
 let iosAudioUnlocked = false;
-const iosAudioCache = new Map();
 let statusRaw = "chooseMode";
 let statusText = t("chooseMode");
 const playerKey = getPlayerKey();
@@ -299,7 +298,7 @@ window.addEventListener("pageshow", () => {
 function enableSoundFromGesture() {
   if (!soundEnabled) return Promise.resolve(false);
   const audioReady = unlockAudio(true);
-  if (isIOS) playIOSAudioFx("start", 0.55, true);
+  if (isIOS) ensureIOSAudioUnlocked();
   return audioReady;
 }
 
@@ -2514,7 +2513,31 @@ function ensureIOSAudioElement() {
   iosAudio.preload = "auto";
   iosAudio.playsInline = true;
   iosAudio.setAttribute("playsinline", "");
+  iosAudio.src = getSilentAudioDataUri();
   return iosAudio;
+}
+
+function ensureIOSAudioUnlocked() {
+  const element = ensureIOSAudioElement();
+  if (!element || iosAudioUnlocked) return Promise.resolve(iosAudioUnlocked);
+  element.currentTime = 0;
+  const playPromise = element.play();
+  if (!playPromise || typeof playPromise.then !== "function") {
+    iosAudioUnlocked = true;
+    return Promise.resolve(true);
+  }
+  return playPromise
+    .then(() => {
+      iosAudioUnlocked = true;
+      element.pause();
+      try {
+        element.currentTime = 0;
+      } catch {
+        // Safari can be touchy about resetting currentTime immediately.
+      }
+      return true;
+    })
+    .catch(() => false);
 }
 
 function getAudioOutput() {
@@ -2585,7 +2608,6 @@ function unlockAudio(fromGesture = true) {
 
 function playFx(kind, intensity = 0.5) {
   if (!soundEnabled) return;
-  if (isIOS && playIOSAudioFx(kind, intensity)) return;
   const unlock = unlockAudio(false);
   if (!audio || audio.state !== "running") {
     void unlock.then((ready) => {
@@ -2614,117 +2636,8 @@ function playFx(kind, intensity = 0.5) {
   playIceClick(now, force, 960 + force * 220, 0.09 + force * 0.045);
 }
 
-function playIOSAudioFx(kind, intensity = 0.5, fromGesture = false) {
-  const element = ensureIOSAudioElement();
-  if (!element || (!iosAudioUnlocked && !fromGesture)) return false;
-  const force = clamp(Number(intensity) || 0.5, 0, 1);
-  const src = makeIOSAudioSrc(kind, force);
-  if (!src) return false;
-
-  try {
-    element.pause();
-    element.currentTime = 0;
-  } catch {
-    // Safari can reject currentTime changes during the first unlock attempt.
-  }
-
-  if (element.src !== src) element.src = src;
-  element.load();
-  const playPromise = element.play();
-  iosAudioUnlocked = true;
-
-  if (playPromise && typeof playPromise.catch === "function") {
-    playPromise.catch(() => {
-      if (fromGesture) iosAudioUnlocked = false;
-    });
-  }
-
-  return true;
-}
-
-function makeIOSAudioSrc(kind, intensity) {
-  const bucket = Math.round(clamp(intensity, 0, 1) * 4) / 4;
-  const key = `${kind}:${bucket}`;
-  if (iosAudioCache.has(key)) return iosAudioCache.get(key);
-
-  let src;
-  if (kind === "score") {
-    src = makeToneWavDataUri([
-      { frequency: 330, start: 0, duration: 0.12, gain: 0.34 },
-      { frequency: 165, start: 0.11, duration: 0.22, gain: 0.42 },
-      { frequency: 96, start: 0.26, duration: 0.18, gain: 0.3 }
-    ], 0.52);
-  } else if (kind === "victory") {
-    src = makeToneWavDataUri([
-      { frequency: 523, start: 0, duration: 0.16, gain: 0.25 },
-      { frequency: 659, start: 0.08, duration: 0.16, gain: 0.27 },
-      { frequency: 784, start: 0.16, duration: 0.18, gain: 0.3 },
-      { frequency: 1046, start: 0.27, duration: 0.24, gain: 0.28 }
-    ], 0.62);
-  } else if (kind === "start") {
-    src = makeToneWavDataUri([
-      { frequency: 440, start: 0, duration: 0.06, gain: 0.00001 }
-    ], 0.16);
-  } else {
-    const base = kind === "wall" ? 720 : 980;
-    src = makeToneWavDataUri([
-      { frequency: base + bucket * 180, start: 0, duration: 0.035, gain: 0.18 + bucket * 0.1 },
-      { frequency: 210 + bucket * 60, start: 0, duration: 0.055, gain: 0.13 + bucket * 0.08 }
-    ], 0.09);
-  }
-
-  iosAudioCache.set(key, src);
-  return src;
-}
-
-function makeToneWavDataUri(tones, duration) {
-  const sampleRate = 22050;
-  const sampleCount = Math.max(1, Math.floor(sampleRate * duration));
-  const bytesPerSample = 2;
-  const dataSize = sampleCount * bytesPerSample;
-  const buffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(buffer);
-  writeAscii(view, 0, "RIFF");
-  view.setUint32(4, 36 + dataSize, true);
-  writeAscii(view, 8, "WAVE");
-  writeAscii(view, 12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * bytesPerSample, true);
-  view.setUint16(32, bytesPerSample, true);
-  view.setUint16(34, 16, true);
-  writeAscii(view, 36, "data");
-  view.setUint32(40, dataSize, true);
-
-  for (let sample = 0; sample < sampleCount; sample += 1) {
-    const time = sample / sampleRate;
-    let value = 0;
-    for (const toneDef of tones) {
-      const localTime = time - toneDef.start;
-      if (localTime < 0 || localTime > toneDef.duration) continue;
-      const fadeIn = Math.min(1, localTime / 0.006);
-      const fadeOut = Math.min(1, (toneDef.duration - localTime) / 0.018);
-      const envelope = Math.max(0, Math.min(fadeIn, fadeOut)) ** 0.85;
-      value += Math.sin(localTime * Math.PI * 2 * toneDef.frequency) * toneDef.gain * envelope;
-    }
-    const shaped = Math.tanh(value * 1.6);
-    view.setInt16(44 + sample * 2, Math.round(shaped * 32767), true);
-  }
-
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  for (let index = 0; index < bytes.length; index += 1) {
-    binary += String.fromCharCode(bytes[index]);
-  }
-  return `data:audio/wav;base64,${btoa(binary)}`;
-}
-
-function writeAscii(view, offset, text) {
-  for (let index = 0; index < text.length; index += 1) {
-    view.setUint8(offset + index, text.charCodeAt(index));
-  }
+function getSilentAudioDataUri() {
+  return "data:audio/mp4;base64,AAAAHGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAABBmb2lzbwAAAAhmcmVlAAAAG21kYXQAAAGzABAHAAABthGYSaQAAAGkbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAABdwAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAzF0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAAdwAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAQAAAAEAAAAAAACkbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAyAAAAMgBVxAAAAAAtaGRscgAAAAAAAAAAbWRpcwAAAAAAAAAAU291bmRIYW5kbGVyAAAAAa9taW5mAAAAFHNtaGQAAAAAAAAAAAAAAACRZGluZgAAABxkcmVmAAAAAAAAAAEAAAAMdXJsIAAAAAEAAAGPc3RibAAAAG1zdHNkAAAAAAAAAAEAAABdbXA0YQAAAAAAAAABAAAAAQAAABRlc2RzAAAAA4CAgE8AAgAEgICAQAAACABIAAAAZCAgIAVAQAGgICAARiAgIAEAAAAAHRicnQAAAAAAAMcc3R0cwAAAAAAAAABAAAAAQAAAgAAAAAUc3RzYwAAAAAAAAABAAAAAQAAAAEAAAABAAAAHHN0c3oAAAAAAAAAAAAAAAEAAAB6AAAAFHN0Y28AAAAAAAAAAQAAADY=";
 }
 
 function playIceClick(start, intensity, resonance, duration) {
