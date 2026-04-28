@@ -268,10 +268,10 @@ let canvasMetrics = null;
 let currentCursor = "";
 const predictedMallets = new Map();
 const LOCAL_PREDICTION_WINDOW_MS = 90;
-const LOCAL_CONTACT_SEPARATION = 0.35;
+const LOCAL_CONTACT_SEPARATION = 0.12;
 const ENABLE_LOCAL_PUCK_PREDICTION = true;
-const INPUT_SWEEP_STEP_PIXELS = 2.5;
-const MAX_INPUT_SWEEP_STEPS = 72;
+const INPUT_SWEEP_STEP_PIXELS = 1.5;
+const MAX_INPUT_SWEEP_STEPS = 144;
 const puckCorrections = new Map();
 let nextInputSeq = 1;
 let lastAckInputSeq = 0;
@@ -1056,22 +1056,12 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
     const relativeStartDistance = Math.hypot(relativeStartX, relativeStartY);
     const movingTowardPuck = sweepX * relativeStartX + sweepY * relativeStartY > 0;
     const a = sweepX * sweepX + sweepY * sweepY;
-    const b = -2 * (relativeStartX * sweepX + relativeStartY * sweepY);
-    const c =
-      relativeStartX * relativeStartX +
-      relativeStartY * relativeStartY -
-      minDistance * minDistance;
     let hitT = null;
 
-    if (relativeStartDistance <= minDistance + 0.001 && malletSpeed > 180) {
+    if (relativeStartDistance <= minDistance + 0.04 && malletSpeed > 180) {
       hitT = 0;
     } else if (movingTowardPuck && a > 0.000001) {
-      const discriminant = b * b - 4 * a * c;
-      if (discriminant >= 0) {
-        const root = Math.sqrt(discriminant);
-        const t0 = (-b - root) / (2 * a);
-        if (t0 >= 0 && t0 <= 1) hitT = t0;
-      }
+      hitT = findEarliestSweepContact(relativeStartX, relativeStartY, -sweepX, -sweepY, minDistance, 0.04);
     }
 
     if (hitT === null) continue;
@@ -1123,6 +1113,34 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
     lastLocalHitFxAt = performance.now();
     playFx("hit", Math.min(1, strike / 900));
   }
+}
+
+function findEarliestSweepContact(startX, startY, deltaX, deltaY, radius, epsilon = 0) {
+  const a = deltaX * deltaX + deltaY * deltaY;
+  if (a <= 0.000001) return null;
+
+  const b = 2 * (startX * deltaX + startY * deltaY);
+  const c = startX * startX + startY * startY - radius * radius;
+  const discriminant = b * b - 4 * a * c;
+  if (discriminant >= 0) {
+    const root = Math.sqrt(discriminant);
+    const t0 = (-b - root) / (2 * a);
+    if (t0 >= 0 && t0 <= 1) return t0;
+  }
+
+  const toward = -(startX * deltaX + startY * deltaY);
+  if (toward <= 0) return null;
+
+  const tClosest = clamp(toward / a, 0, 1);
+  const closestX = startX + deltaX * tClosest;
+  const closestY = startY + deltaY * tClosest;
+  const radiusWithEpsilon = radius + epsilon;
+  const closestDistanceSq = closestX * closestX + closestY * closestY;
+  if (closestDistanceSq > radiusWithEpsilon * radiusWithEpsilon) return null;
+
+  const deltaLength = Math.sqrt(a);
+  const rewind = Math.sqrt(Math.max(0, radiusWithEpsilon * radiusWithEpsilon - closestDistanceSq)) / deltaLength;
+  return clamp(tClosest - rewind, 0, 1);
 }
 
 function eventToTable(event) {

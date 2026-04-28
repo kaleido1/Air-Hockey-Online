@@ -43,8 +43,8 @@ const PUCK_RESTITUTION = 0.85;
 const MALLET_RESTITUTION = 0.80;
 const MALLET_STRIKE_TRANSFER = 0.62;
 const MALLET_HIT_COOLDOWN_MS = 28;
-const CONTACT_SEPARATION = 0.35;
-const CONTACT_SLOP = 0.15;
+const CONTACT_SEPARATION = 0.12;
+const CONTACT_SLOP = 0.04;
 const STATIC_PUCK_SPEED = 70;
 const STATIC_STRIKE_MIN_SPEED = 520;
 const STATIC_SWEEP_MIN_SPEED = 460;
@@ -52,8 +52,8 @@ const EDGE_BLOCK_RESPONSE_SPEED = 48;
 const STRONG_STRIKE_MIN_SPEED = 180;
 const STRIKE_ESCAPE_TRANSFER = 0.42;
 const PUCK_SUBSTEPS = 18;
-const INPUT_SWEEP_STEP_PIXELS = 2.5;
-const MAX_INPUT_SWEEP_STEPS = 72;
+const INPUT_SWEEP_STEP_PIXELS = 1.5;
+const MAX_INPUT_SWEEP_STEPS = 144;
 const FRICTION_PER_SECOND = 0.991;
 const STUCK_SPEED = 95;
 const STUCK_SECONDS = 0.38;
@@ -1061,7 +1061,7 @@ function forceSeparatePuckFromMallet(room, puck, mallet) {
 
   const nx = dx / distance;
   const ny = dy / distance;
-  const overlap = (contact?.overlap ?? minDistance - distance) + CONTACT_SEPARATION + 0.85;
+  const overlap = (contact?.overlap ?? minDistance - distance) + CONTACT_SEPARATION + 0.18;
   puck.x += nx * overlap;
   puck.y += ny * overlap;
 
@@ -1125,30 +1125,19 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   let dy = probeY - contactY;
   let distance = Math.hypot(dx, dy);
   let sweptHit = false;
-  const startedInContact = relativeStartDistance <= minDistance + 0.001;
+  const startedInContact = relativeStartDistance <= minDistance + CONTACT_SLOP;
 
-  if (relativeStartDistance > minDistance + 0.001) {
-    const a = relativeDeltaX * relativeDeltaX + relativeDeltaY * relativeDeltaY;
-    const b = 2 * (relativeStartX * relativeDeltaX + relativeStartY * relativeDeltaY);
-    const c =
-      relativeStartX * relativeStartX +
-      relativeStartY * relativeStartY -
-      minDistance * minDistance;
+  if (!startedInContact) {
+    hitT = findEarliestSweepContact(
+      relativeStartX,
+      relativeStartY,
+      relativeDeltaX,
+      relativeDeltaY,
+      minDistance,
+      CONTACT_SLOP
+    );
 
-    let hit = false;
-    if (a > 0.000001) {
-      const discriminant = b * b - 4 * a * c;
-      if (discriminant >= 0) {
-        const root = Math.sqrt(discriminant);
-        const t0 = (-b - root) / (2 * a);
-        if (t0 >= 0 && t0 <= 1) {
-          hit = true;
-          hitT = t0;
-        }
-      }
-    }
-
-    if (hit) {
+    if (hitT !== null) {
       sweptHit = true;
       probeX = puckStartX + puckDeltaX * hitT;
       probeY = puckStartY + puckDeltaY * hitT;
@@ -1191,18 +1180,8 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   const nx = dx / distance;
   const ny = dy / distance;
 
-  if (sweptHit) {
-    puck.x = contactX + nx * (minDistance + CONTACT_SEPARATION);
-    puck.y = contactY + ny * (minDistance + CONTACT_SEPARATION);
-  } else {
-    const separation = finalContact
-      ? finalContact.overlap + CONTACT_SEPARATION
-      : minDistance - distance + CONTACT_SEPARATION;
-    if (separation > 0) {
-      puck.x += nx * separation;
-      puck.y += ny * separation;
-    }
-  }
+  puck.x = contactX + nx * (minDistance + CONTACT_SEPARATION);
+  puck.y = contactY + ny * (minDistance + CONTACT_SEPARATION);
 
   const rvx = puck.vx - strikeVx;
   const rvy = puck.vy - strikeVy;
@@ -1343,6 +1322,34 @@ function getSatCircleContact(ax, ay, ar, bx, by, br) {
     ny: response.overlapN.y / length,
     overlap: response.overlap
   };
+}
+
+function findEarliestSweepContact(startX, startY, deltaX, deltaY, radius, epsilon = 0) {
+  const a = deltaX * deltaX + deltaY * deltaY;
+  if (a <= 0.000001) return null;
+
+  const b = 2 * (startX * deltaX + startY * deltaY);
+  const c = startX * startX + startY * startY - radius * radius;
+  const discriminant = b * b - 4 * a * c;
+  if (discriminant >= 0) {
+    const root = Math.sqrt(discriminant);
+    const t0 = (-b - root) / (2 * a);
+    if (t0 >= 0 && t0 <= 1) return t0;
+  }
+
+  const toward = -(startX * deltaX + startY * deltaY);
+  if (toward <= 0) return null;
+
+  const tClosest = clamp(toward / a, 0, 1);
+  const closestX = startX + deltaX * tClosest;
+  const closestY = startY + deltaY * tClosest;
+  const radiusWithEpsilon = radius + epsilon;
+  const closestDistanceSq = closestX * closestX + closestY * closestY;
+  if (closestDistanceSq > radiusWithEpsilon * radiusWithEpsilon) return null;
+
+  const deltaLength = Math.sqrt(a);
+  const rewind = Math.sqrt(Math.max(0, radiusWithEpsilon * radiusWithEpsilon - closestDistanceSq)) / deltaLength;
+  return clamp(tClosest - rewind, 0, 1);
 }
 
 function getClientNetworkKey(req) {
@@ -2034,6 +2041,57 @@ export function runSatCollisionSelfTest() {
       Math.abs(touching.overlap - 5) < 0.001 &&
       touching.nx > 0.99 &&
       separate === null
+  };
+}
+
+export function runHighSpeedStaticStrikeSelfTest() {
+  const room = {
+    state: {
+      pucks: [],
+      mallets: []
+    },
+    players: [],
+    lastFxAt: new Map(),
+    updatedAt: Date.now()
+  };
+  const mallet = {
+    x: 110,
+    y: 760,
+    vx: 0,
+    vy: 0,
+    targetX: 290,
+    targetY: 760,
+    sweepFromX: 110,
+    sweepFromY: 760,
+    sweepStartedAt: Date.now() - 8,
+    hasPendingSweep: false
+  };
+  const puck = {
+    id: "static-strike",
+    x: 222,
+    y: 760,
+    prevX: 222,
+    prevY: 760,
+    vx: 0,
+    vy: 0,
+    stuckFor: 0,
+    lastMalletHitIndex: null,
+    lastMalletHitAt: 0
+  };
+  room.state.mallets = [mallet];
+  room.state.pucks = [puck];
+
+  applyDirectInputSweep(room, mallet, 0, 290, 760, 1 / 120, Date.now(), 2600, 0);
+  const distance = Math.hypot(puck.x - mallet.x, puck.y - mallet.y);
+  const minDistance = TABLE.malletRadius + TABLE.puckRadius;
+  const hit = puck.lastMalletHitIndex === 0 || Math.hypot(puck.vx, puck.vy) > 0;
+  return {
+    hit,
+    distance,
+    minDistance,
+    vx: puck.vx,
+    vy: puck.vy,
+    passed: Boolean(hit) && distance >= minDistance && Math.hypot(puck.vx, puck.vy) >= PUCK_MIN_LIVE_SPEED
   };
 }
 
