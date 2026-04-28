@@ -37,6 +37,10 @@ const els = {
   leaveButton: document.querySelector("#leaveButton"),
   onePuckButton: document.querySelector("#onePuckButton"),
   twoPuckButton: document.querySelector("#twoPuckButton"),
+  soundGate: document.querySelector("#soundGate"),
+  soundGateTitle: document.querySelector("#soundGateTitle"),
+  soundGateHint: document.querySelector("#soundGateHint"),
+  soundGateButton: document.querySelector("#soundGateButton"),
   eyebrow: document.querySelector(".eyebrow"),
   panelTitle: document.querySelector(".panel h1"),
   joinButton: document.querySelector("#joinForm button"),
@@ -253,8 +257,8 @@ let previousUiScreen = null;
 let uiTransitionStartedAt = performance.now();
 let pendingStartMode = "bot";
 let pendingModeStartAction = null;
+let soundGateActivationPending = false;
 let menuButtons = [];
-const pendingPointerUiActions = new Map();
 let soundEnabled = getInitialSoundEnabled();
 let audioSessionArmed = !isIOS;
 let localPointerMalletIndex = 0;
@@ -423,6 +427,10 @@ els.joinForm.addEventListener("submit", (event) => {
     });
   }
 });
+els.soundGateButton.addEventListener("click", (event) => {
+  event.preventDefault();
+  confirmSoundGate();
+});
 els.copyButton.addEventListener("click", async () => {
   if (!shouldExposeRoomInUrl()) return;
   const url = new URL(location.href);
@@ -517,7 +525,6 @@ window.addEventListener(
 canvas.addEventListener("pointerup", (event) => {
   pointerDown = false;
   if (suppressedGameplayPointers.delete(event.pointerId)) {
-    runPendingPointerUiAction(event.pointerId);
     return;
   }
   if (isActivePlay()) {
@@ -535,7 +542,6 @@ window.addEventListener(
     if (!suppressedGameplayPointers.has(event.pointerId)) return;
     pointerDown = false;
     suppressedGameplayPointers.delete(event.pointerId);
-    runPendingPointerUiAction(event.pointerId);
   },
   { passive: true }
 );
@@ -543,7 +549,6 @@ window.addEventListener(
 canvas.addEventListener("pointercancel", () => {
   pointerDown = false;
   suppressedGameplayPointers.clear();
-  pendingPointerUiActions.clear();
   activePointers.clear();
 });
 
@@ -886,6 +891,9 @@ function applyLanguage() {
   els.copyButton.textContent = t("copyLink");
   els.restartButton.textContent = t("restart");
   els.leaveButton.textContent = t("leave");
+  els.soundGateTitle.textContent = t("soundStartTitle");
+  els.soundGateHint.textContent = t("soundStartHint");
+  els.soundGateButton.textContent = t("soundStartButton");
   [t("room"), t("status"), t("ping")].forEach((label, index) => {
     if (els.metaLabels[index]) els.metaLabels[index].textContent = label;
   });
@@ -2160,24 +2168,12 @@ function handleCanvasUi(point, clickCount = 1, event = null) {
       point.y >= button.y &&
       point.y <= button.y + button.h
     ) {
-      if (button.runOnPointerUp && event) {
-        pendingPointerUiActions.set(event.pointerId, button.action);
-        return true;
-      }
       button.action();
       return true;
     }
   }
 
   return Boolean(uiScreen);
-}
-
-function runPendingPointerUiAction(pointerId) {
-  const action = pendingPointerUiActions.get(pointerId);
-  if (!action) return false;
-  pendingPointerUiActions.delete(pointerId);
-  action();
-  return true;
 }
 
 function handleTouchPause(event, point) {
@@ -2269,7 +2265,43 @@ function runWithSoundGate(action) {
     return;
   }
   pendingModeStartAction = action;
-  showUi("sound");
+  showSoundGate();
+}
+
+function showSoundGate() {
+  soundGateActivationPending = false;
+  els.soundGateButton.disabled = false;
+  els.soundGate.hidden = false;
+  els.soundGateButton.focus({ preventScroll: true });
+}
+
+function hideSoundGate() {
+  els.soundGate.hidden = true;
+  soundGateActivationPending = false;
+  els.soundGateButton.disabled = false;
+}
+
+function confirmSoundGate() {
+  if (soundGateActivationPending) return;
+  soundGateActivationPending = true;
+  els.soundGateButton.disabled = true;
+  audioSessionArmed = true;
+  soundEnabled = true;
+  persistSoundEnabled();
+  const action = pendingModeStartAction;
+  pendingModeStartAction = null;
+  void armAudioSessionFromModeButton().then((ready) => {
+    if (!ready) {
+      audioSessionArmed = false;
+      pendingModeStartAction = action;
+      soundGateActivationPending = false;
+      els.soundGateButton.disabled = false;
+      return;
+    }
+    hideSoundGate();
+    playFx("hit", 0.18);
+    if (action) action();
+  });
 }
 
 function isActivePlay() {
@@ -2344,7 +2376,6 @@ function getWaitingHintText() {
 function clearControls() {
   pointerDown = false;
   suppressedGameplayPointers.clear();
-  pendingPointerUiActions.clear();
   activePointers.clear();
   lastCenterTapAt = 0;
   localPointerMalletIndex = 0;
@@ -2785,7 +2816,6 @@ function drawUiScreen(screen, offsetY, alpha, interactive) {
   if (screen === "online") drawOnlineMenu(interactive);
   if (screen === "waiting") drawWaitingMenu(interactive);
   if (screen === "notice") drawNoticeMenu(interactive);
-  if (screen === "sound") drawSoundGateMenu(interactive);
 
   ctx.restore();
 }
@@ -2878,41 +2908,6 @@ function drawLanguageButton(interactive) {
   ctx.fillText(t("languageButton"), button.x + button.w / 2, button.y + button.h / 2 + 1);
   ctx.restore();
   if (interactive) addButton(button, toggleLanguage);
-}
-
-function drawSoundGateMenu(interactive) {
-  const x = 64;
-  const y = 354;
-  const w = 462;
-  const h = 264;
-  drawBluePanel(x, y, w, h, 24);
-
-  ctx.save();
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillStyle = "#ffffff";
-  ctx.shadowColor = "rgba(0,0,0,0.42)";
-  ctx.shadowBlur = 3;
-  ctx.shadowOffsetY = 2;
-  ctx.font = "900 42px Arial, sans-serif";
-  ctx.fillText(t("soundStartTitle"), x + w / 2, y + 62);
-  ctx.font = "700 22px Arial, sans-serif";
-  ctx.fillText(t("soundStartHint"), x + w / 2, y + 112);
-  ctx.restore();
-
-  const start = { x: x + 26, y: y + 156, w: w - 52, h: 64 };
-  drawRedButton(start.x, start.y, start.w, start.h, t("soundStartButton"), 25);
-
-  if (interactive) {
-    addReleaseButton(start, () => {
-      const action = pendingModeStartAction;
-      pendingModeStartAction = null;
-      void armAudioSessionFromModeButton().then((ready) => {
-        if (ready) playFx("hit", 0.18);
-      });
-      if (action) action();
-    });
-  }
 }
 
 function drawPuckMenu(interactive) {
@@ -3534,10 +3529,6 @@ function drawStatusPill(text) {
 
 function addButton(rect, action) {
   menuButtons.push({ ...rect, action });
-}
-
-function addReleaseButton(rect, action) {
-  menuButtons.push({ ...rect, action, runOnPointerUp: true });
 }
 
 async function copyInviteLink() {
