@@ -56,6 +56,7 @@ const colors = {
 };
 
 const LANGUAGE_STORAGE_KEY = "air-hockey-online-language";
+const SOUND_ENABLED_STORAGE_KEY = "air-hockey-online-sound-enabled-v3";
 const translations = {
   zh: {
     you: "你",
@@ -240,8 +241,8 @@ let uiTransitionStartedAt = performance.now();
 let pendingStartMode = "bot";
 let pendingModeStartAction = null;
 let menuButtons = [];
-let soundEnabled = false;
-let audioSessionArmed = false;
+let soundEnabled = getInitialSoundEnabled();
+let audioSessionArmed = !isIOS;
 let localPointerMalletIndex = 0;
 let lastPhase = null;
 let phaseChangedAt = performance.now();
@@ -676,6 +677,25 @@ function getInitialLanguage() {
     // Ignore storage failures in private browsing modes.
   }
   return navigator.language?.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+function getInitialSoundEnabled() {
+  try {
+    const saved = localStorage.getItem(SOUND_ENABLED_STORAGE_KEY);
+    if (saved === "false") return false;
+    if (saved === "true") return true;
+  } catch {
+    // Ignore storage failures and use platform defaults.
+  }
+  return !isIOS;
+}
+
+function persistSoundEnabled() {
+  try {
+    localStorage.setItem(SOUND_ENABLED_STORAGE_KEY, String(soundEnabled));
+  } catch {
+    // Ignore storage failures for this session.
+  }
 }
 
 function t(key) {
@@ -1798,6 +1818,7 @@ function drawPauseOverlay() {
   addButton({ x: 124, y: 22, w: 342, h: 116 }, exitToMain);
   addButton({ x: 62, y: 686, w: 172, h: 150 }, () => {
     soundEnabled = !soundEnabled;
+    persistSoundEnabled();
     if (!soundEnabled) {
       applyAudioSessionType("auto");
       stopAudioKeepAlive();
