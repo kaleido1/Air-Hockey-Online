@@ -1,3 +1,5 @@
+import { decodeRealtimePacket, encodeInputPacket } from "./protocol.js";
+
 const canvas = document.querySelector("#rink");
 const isAndroid = /Android/i.test(navigator.userAgent || "");
 const isIOS =
@@ -267,7 +269,13 @@ let currentCursor = "";
 const predictedMallets = new Map();
 const LOCAL_PREDICTION_WINDOW_MS = 90;
 const LOCAL_CONTACT_SEPARATION = 0.75;
-const ENABLE_LOCAL_PUCK_PREDICTION = false;
+const ENABLE_LOCAL_PUCK_PREDICTION = true;
+const puckCorrections = new Map();
+let nextInputSeq = 1;
+let lastAckInputSeq = 0;
+let lastLocalHitFxAt = 0;
+let lastServerTickExtended = null;
+let interpolationDelayMs = 16;
 
 applyLanguage();
 startRefreshRateSampling();
@@ -481,6 +489,7 @@ window.addEventListener("keydown", (event) => {
 function connect() {
   clearTimeout(reconnectTimer);
   socket = new WebSocket(getWebSocketUrl());
+  socket.binaryType = "arraybuffer";
 
   socket.addEventListener("open", () => {
     connected = true;
@@ -495,8 +504,11 @@ function connect() {
   });
 
   socket.addEventListener("message", (event) => {
-    const message = JSON.parse(event.data);
-    handleMessage(message);
+    if (typeof event.data === "string") {
+      handleMessage(JSON.parse(event.data));
+      return;
+    }
+    handleRealtimeMessage(event.data);
   });
 
   socket.addEventListener("close", () => {
@@ -554,40 +566,8 @@ function handleMessage(message) {
       showUi(null);
       setStatus("getReady");
       break;
-    case "state":
-      previousState = serverState;
-      serverState = message.state;
-      lastStateReceivedAt = performance.now();
-      rememberStateSnapshot(message);
-      roomSettings = message.settings || roomSettings;
-      if (serverState.phase !== lastPhase) {
-        lastPhase = serverState.phase;
-        phaseChangedAt = performance.now();
-        if (serverState.phase === "gameover") {
-          scheduleGameoverReturn();
-          const self = playerIndex === 1 ? 1 : 0;
-          if (serverState.winner === self) playFx("victory", 1);
-        }
-        if (serverState.phase === "paused" || serverState.phase === "gameover") clearControls();
-        if (serverState.phase !== "gameover" && gameoverReturnTimer) {
-          clearTimeout(gameoverReturnTimer);
-          gameoverReturnTimer = 0;
-        }
-      }
-      updateScoreboard(message);
-      if (!(roomMinimized && message.state.phase === "waiting")) updatePhaseText();
-      if (["playing", "countdown", "point", "gameover", "paused"].includes(message.state.phase)) {
-        roomMinimized = false;
-        showUi(null);
-      } else if (message.state.phase === "waiting" && roomCode && !roomMinimized) {
-        showUi("waiting");
-      }
-      break;
     case "score":
       playFx("score", 1);
-      break;
-    case "fx":
-      playFx(message.kind, message.intensity);
       break;
     case "notice":
       if (message.message === "Opponent left the room") {
@@ -614,6 +594,52 @@ function handleMessage(message) {
       break;
     default:
       break;
+  }
+}
+
+function handleRealtimeMessage(packet) {
+  const message = decodeRealtimePacket(packet, Date.now());
+  if (!message) return;
+
+  if (message.type === "state") {
+    applyRealtimeState(message);
+    return;
+  }
+
+  if (message.type === "fx") {
+    if (message.kind === "hit" && performance.now() - lastLocalHitFxAt < 45) return;
+    playFx(message.kind, message.intensity);
+  }
+}
+
+function applyRealtimeState(message) {
+  applyPuckCorrection(message.state);
+  previousState = serverState;
+  serverState = message.state;
+  lastStateReceivedAt = performance.now();
+  lastAckInputSeq = Math.max(lastAckInputSeq, message.ackInputSeq || 0);
+  rememberStateSnapshot(message);
+  if (serverState.phase !== lastPhase) {
+    lastPhase = serverState.phase;
+    phaseChangedAt = performance.now();
+    if (serverState.phase === "gameover") {
+      scheduleGameoverReturn();
+      const self = playerIndex === 1 ? 1 : 0;
+      if (serverState.winner === self) playFx("victory", 1);
+    }
+    if (serverState.phase === "paused" || serverState.phase === "gameover") clearControls();
+    if (serverState.phase !== "gameover" && gameoverReturnTimer) {
+      clearTimeout(gameoverReturnTimer);
+      gameoverReturnTimer = 0;
+    }
+  }
+  updateScoreboard();
+  if (!(roomMinimized && message.state.phase === "waiting")) updatePhaseText();
+  if (["playing", "countdown", "point", "gameover", "paused"].includes(message.state.phase)) {
+    roomMinimized = false;
+    showUi(null);
+  } else if (message.state.phase === "waiting" && roomCode && !roomMinimized) {
+    showUi("waiting");
   }
 }
 
@@ -862,6 +888,11 @@ function clearRoom() {
   stateSnapshots.length = 0;
   roomPlayers = null;
   predictedMallets.clear();
+  puckCorrections.clear();
+  nextInputSeq = 1;
+  lastAckInputSeq = 0;
+  lastServerTickExtended = null;
+  interpolationDelayMs = 16;
   els.roomCode.textContent = "-";
   els.roomPill.textContent = t("offline");
   els.youLabel.textContent = t("you");
@@ -872,6 +903,41 @@ function clearRoom() {
   showUi("main");
   setButtons();
   history.replaceState(null, "", location.pathname);
+}
+
+function applyPuckCorrection(nextState) {
+  if (!nextState?.pucks?.length || !serverState?.pucks?.length) {
+    puckCorrections.clear();
+    return;
+  }
+
+  const now = performance.now();
+  const incoming = new Map(nextState.pucks.map((puck) => [puck.id, puck]));
+  for (const [id, correction] of puckCorrections.entries()) {
+    if (!incoming.has(id) || correction.expiresAt <= now) {
+      puckCorrections.delete(id);
+    }
+  }
+
+  for (const puck of serverState.pucks) {
+    const authoritative = incoming.get(puck.id);
+    if (!authoritative) continue;
+    const dx = puck.x - authoritative.x;
+    const dy = puck.y - authoritative.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance < 4) {
+      puckCorrections.delete(puck.id);
+      continue;
+    }
+    puckCorrections.set(puck.id, {
+      fromX: puck.x,
+      fromY: puck.y,
+      toX: authoritative.x,
+      toY: authoritative.y,
+      startedAt: now,
+      expiresAt: now + (distance > 28 ? 44 : 80)
+    });
+  }
 }
 
 function sendPointer(event, force, overridePlayerIndex = null) {
@@ -929,7 +995,15 @@ function sendPointerFromPoint(point, force, targetIndex) {
   if (ENABLE_LOCAL_PUCK_PREDICTION) {
     applyLocalStrikePrediction(targetIndex, fromX, fromY, constrained.x, constrained.y, now);
   }
-  send({ type: "input", x: constrained.x, y: constrained.y, playerIndex: targetIndex });
+  sendRealtime(
+    encodeInputPacket({
+      inputSeq: nextInputSeq++,
+      clientTick: Math.round(now),
+      playerIndex: targetIndex,
+      x: constrained.x,
+      y: constrained.y
+    })
+  );
 }
 
 function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
@@ -1017,6 +1091,7 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now) {
     puck.y += puck.vy * 0.014;
     puck.localPredictedAt = now;
     puck.localPredictionExpiresAt = now + LOCAL_PREDICTION_WINDOW_MS;
+    lastLocalHitFxAt = performance.now();
     playFx("hit", Math.min(1, strike / 900));
   }
 }
@@ -1075,6 +1150,11 @@ function send(message) {
     message.type === "lan" ||
     message.type === "local";
   socket.send(JSON.stringify(needsIdentity ? { ...message, key: playerKey } : message));
+}
+
+function sendRealtime(payload) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(payload);
 }
 
 function getPlayerKey() {
@@ -1319,27 +1399,52 @@ function resizeCanvas() {
 }
 
 function rememberStateSnapshot(message) {
-  const serverTime = Number(message.now) || Date.now();
+  const serverTick = Number(message.serverTick) || 0;
+  const serverTickExtended = extendServerTick(serverTick);
+  const serverTime = (serverTickExtended * 1000) / 180;
   stateSnapshots.push({
     serverTime,
+    serverTick,
+    serverTickExtended,
     receivedAt: performance.now(),
     state: message.state
   });
   while (stateSnapshots.length > 3) stateSnapshots.shift();
+  if (stateSnapshots.length >= 2) {
+    const previous = stateSnapshots[stateSnapshots.length - 2];
+    const latest = stateSnapshots[stateSnapshots.length - 1];
+    const spacingMs = latest.serverTime - previous.serverTime;
+    const targetDelay = clamp(spacingMs * 1.35, 14, 22);
+    interpolationDelayMs = lerp(interpolationDelayMs, targetDelay, 0.35);
+  }
 }
 
 function renderState() {
   if (!serverState) return null;
   if (serverState.phase !== "playing" || stateSnapshots.length < 2) return serverState;
 
-  const previous = stateSnapshots[stateSnapshots.length - 2];
-  const next = stateSnapshots[stateSnapshots.length - 1];
+  const newest = stateSnapshots[stateSnapshots.length - 1];
+  const targetTime = newest.serverTime - interpolationDelayMs;
+
+  let previous = stateSnapshots[0];
+  let next = newest;
+  for (let index = 1; index < stateSnapshots.length; index += 1) {
+    const candidate = stateSnapshots[index];
+    if (candidate.serverTime >= targetTime) {
+      previous = stateSnapshots[index - 1] || candidate;
+      next = candidate;
+      break;
+    }
+    previous = candidate;
+    next = candidate;
+  }
+
   if (!previous || !next) return serverState;
+  if (previous === next) return next.state;
   if (previous.state.phase !== next.state.phase) return next.state;
 
-  const snapshotSpanMs = clamp(next.serverTime - previous.serverTime || 1000 / 60, 1000 / 90, 1000 / 24);
-  const elapsedSinceReceive = Math.max(0, performance.now() - lastStateReceivedAt);
-  const alpha = clamp((elapsedSinceReceive + measuredRttMs * 0.08) / snapshotSpanMs, 0, 1);
+  const spanMs = Math.max(1, next.serverTime - previous.serverTime);
+  const alpha = clamp((targetTime - previous.serverTime) / spanMs, 0, 1);
   return interpolateState(previous.state, next.state, alpha);
 }
 
@@ -1367,6 +1472,41 @@ function interpolateBody(from, to, alpha) {
     vx: lerp(from.vx || 0, to.vx || 0, alpha),
     vy: lerp(from.vy || 0, to.vy || 0, alpha)
   };
+}
+
+function displayPuck(puck) {
+  const correction = puckCorrections.get(puck.id);
+  if (!correction) return puck;
+  const now = performance.now();
+  if (now >= correction.expiresAt) {
+    puckCorrections.delete(puck.id);
+    return puck;
+  }
+
+  const duration = Math.max(1, correction.expiresAt - correction.startedAt);
+  const alpha = clamp((now - correction.startedAt) / duration, 0, 1);
+  const blend = 1 - Math.pow(1 - alpha, 2);
+  return {
+    ...puck,
+    x: lerp(correction.fromX, correction.toX, blend),
+    y: lerp(correction.fromY, correction.toY, blend)
+  };
+}
+
+function wrappedTickDelta(previousTick, nextTick) {
+  const prev = previousTick & 0xffff;
+  const next = nextTick & 0xffff;
+  return next >= prev ? next - prev : 0x10000 - prev + next;
+}
+
+function extendServerTick(serverTick) {
+  if (lastServerTickExtended === null) {
+    lastServerTickExtended = serverTick & 0xffff;
+    return lastServerTickExtended;
+  }
+  const delta = wrappedTickDelta(lastServerTickExtended, serverTick);
+  lastServerTickExtended += delta;
+  return lastServerTickExtended;
 }
 
 function render(frameTime = performance.now()) {
@@ -2392,7 +2532,7 @@ function drawGoalSlot(y, outer) {
 function drawState(state) {
   ctx.save();
   for (let index = 0; index < (state.pucks || []).length; index += 1) {
-    drawPuck(state.pucks[index], index);
+    drawPuck(displayPuck(state.pucks[index]), index);
   }
 
   for (let index = 0; index < state.mallets.length; index += 1) {

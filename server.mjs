@@ -3,12 +3,18 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  decodeRealtimePacket,
+  encodeFxPacket,
+  encodeStatePacket
+} from "./public/protocol.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
 
 const HOST = process.env.HOST || process.env.HOSTNAME || "127.0.0.1";
 const PORT = Number(process.env.PORT || 3100);
+const PROTOCOL_VERSION = 2;
 
 const TABLE = {
   width: 590,
@@ -67,6 +73,20 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || HOST}`);
   let pathname = decodeURIComponent(url.pathname);
   if (pathname === "/") pathname = "/index.html";
+
+  if (pathname === "/runtime-config.js") {
+    res.writeHead(200, {
+      "Content-Type": "text/javascript; charset=utf-8",
+      "Cache-Control": "no-store"
+    });
+    res.end(
+      [
+        `window.AIR_HOCKEY_SERVER_URL = ${JSON.stringify(String(process.env.AIR_HOCKEY_SERVER_URL || "").trim())};`,
+        "window.AIR_HOCKEY_REALTIME_MODE = 'binary-websocket';"
+      ].join("\n")
+    );
+    return;
+  }
 
   const filePath = path.normalize(path.join(publicDir, pathname));
   if (!filePath.startsWith(publicDir)) {
@@ -131,12 +151,19 @@ server.on("upgrade", (req, socket) => {
     lastPongAt: Date.now(),
     displayRefreshHz: SNAPSHOT_HZ,
     snapshotIntervalMs: 1000 / SNAPSHOT_HZ,
-    lastSnapshotAt: 0
+    lastSnapshotAt: 0,
+    lastInputSeq: 0
   };
 
   socket.setNoDelay(true);
   clients.set(client.id, client);
-  send(client, { type: "hello", clientId: client.id, table: TABLE });
+  send(client, {
+    type: "hello",
+    clientId: client.id,
+    table: TABLE,
+    protocolVersion: PROTOCOL_VERSION,
+    realtimeMode: "binary-websocket"
+  });
 
   socket.on("data", (chunk) => readFrames(client, chunk));
   socket.on("end", () => disconnect(client));
@@ -210,6 +237,11 @@ function readFrames(client, chunk) {
       continue;
     }
 
+    if (opcode === 0x2) {
+      handleRealtimePacket(client, payload);
+      continue;
+    }
+
     if (opcode !== 0x1) continue;
 
     try {
@@ -218,6 +250,14 @@ function readFrames(client, chunk) {
     } catch {
       send(client, { type: "error", message: "Bad message" });
     }
+  }
+}
+
+function handleRealtimePacket(client, payload) {
+  const packet = decodeRealtimePacket(payload, Date.now());
+  if (!packet) return;
+  if (packet.type === "input") {
+    updateInput(client, packet);
   }
 }
 
@@ -477,6 +517,7 @@ function addPlayer(room, client, playerIndex) {
   };
   client.roomCode = room.code;
   client.playerIndex = playerIndex;
+  client.lastInputSeq = 0;
   room.state.mallets[playerIndex].targetX = room.state.mallets[playerIndex].x;
   room.state.mallets[playerIndex].targetY = room.state.mallets[playerIndex].y;
 
@@ -510,6 +551,7 @@ function makeRoom(options = {}) {
       bot: Boolean(options.bot)
     },
     state: initialState(normalizePuckCount(options.puckCount)),
+    serverTick: 0,
     phaseStartedAt: Date.now(),
     lastSnapshotAt: 0,
     lastFxAt: new Map(),
@@ -543,6 +585,7 @@ function restartRoom(client) {
   const room = currentRoom(client);
   if (!room) return;
   room.state = initialState(room.settings.puckCount);
+  room.serverTick = 0;
   startRoom(room);
 }
 
@@ -729,6 +772,7 @@ function updateInput(client, message) {
   mallet.vy = (dy / inputDt) * velocityScale;
   mallet.lastInputAt = now;
   mallet.directInputUntil = now + 90;
+  client.lastInputSeq = Number(message.inputSeq) || client.lastInputSeq || 0;
 
   if (room.state.phase === "playing") {
     resolveInputHits(room, mallet, playerIndex, inputDt);
@@ -741,6 +785,7 @@ function tickRooms() {
   const now = Date.now();
 
   for (const room of rooms.values()) {
+    room.serverTick = (room.serverTick + 1) & 0xffff;
     if (!canStartRoom(room) && room.state.phase !== "waiting") {
       room.state.phase = "waiting";
       room.state.phaseEndsAt = 0;
@@ -1624,14 +1669,7 @@ function sendSnapshots() {
 }
 
 function sendRoomState(room, now = Date.now(), force = false) {
-  const message = {
-    type: "state",
-    now,
-    code: room.code,
-    players: publicPlayers(room),
-    settings: room.settings,
-    state: publicState(room.state)
-  };
+  const state = publicState(room.state);
   const sent = new Set();
   for (const player of room.players) {
     if (!player || player.bot) continue;
@@ -1640,7 +1678,14 @@ function sendRoomState(room, now = Date.now(), force = false) {
     if (!force && now - client.lastSnapshotAt < client.snapshotIntervalMs - 1) continue;
     sent.add(client.id);
     client.lastSnapshotAt = now;
-    send(client, message);
+    sendRealtime(
+      client,
+      encodeStatePacket(state, {
+        serverTick: room.serverTick,
+        ackInputSeq: client.lastInputSeq,
+        phaseEndsInMs: state.phaseEndsInMs
+      })
+    );
   }
 }
 
@@ -1699,7 +1744,7 @@ function emitFx(room, kind, force = false, intensity = 0.5) {
   const minGap = kind === "wall" ? 75 : kind === "hit" ? 55 : 0;
   if (!force && now - lastAt < minGap) return;
   room.lastFxAt.set(key, now);
-  broadcastRoom(room, { type: "fx", kind, intensity: round(clamp(intensity, 0, 1)) });
+  broadcastRealtime(room, encodeFxPacket(kind, round(clamp(intensity, 0, 1))));
 }
 
 function broadcastRoom(room, message) {
@@ -1716,6 +1761,22 @@ function broadcastRoom(room, message) {
 
 function send(client, message) {
   sendFrame(client, Buffer.from(JSON.stringify(message), "utf8"), 0x1);
+}
+
+function sendRealtime(client, payload) {
+  sendFrame(client, Buffer.from(payload), 0x2);
+}
+
+function broadcastRealtime(room, payload) {
+  const sent = new Set();
+  for (const player of room.players) {
+    if (!player || player.bot) continue;
+    const client = clients.get(player.id);
+    if (client && !sent.has(client.id)) {
+      sent.add(client.id);
+      sendRealtime(client, payload);
+    }
+  }
 }
 
 function sendFrame(client, payload, opcode = 0x1) {
