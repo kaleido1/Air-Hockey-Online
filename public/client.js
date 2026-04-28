@@ -223,6 +223,7 @@ let audioPrimed = false;
 let audioUnlockPromise = null;
 let audioUnlockedByGesture = false;
 let audioActivationPrimed = false;
+let audioNeedsTouchReactivate = false;
 let statusRaw = "chooseMode";
 let statusText = t("chooseMode");
 const playerKey = getPlayerKey();
@@ -264,7 +265,10 @@ requestAnimationFrame(render);
 
 window.addEventListener("resize", resizeCanvas);
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState !== "visible") return;
+  if (document.visibilityState !== "visible") {
+    markAudioForTouchReactivate();
+    return;
+  }
   startRefreshRateSampling();
   if (!connected) {
     clearTimeout(reconnectTimer);
@@ -272,6 +276,8 @@ document.addEventListener("visibilitychange", () => {
   }
   void recoverAudioContext();
 });
+window.addEventListener("pagehide", markAudioForTouchReactivate, { passive: true });
+window.addEventListener("blur", markAudioForTouchReactivate, { passive: true });
 window.addEventListener("pointerdown", () => {
   void activateAudioFromGesture();
 }, { capture: true, passive: true });
@@ -2515,12 +2521,20 @@ function activateAudioFromGesture() {
   if (!soundEnabled) return Promise.resolve(false);
   const context = ensureAudioContext();
   if (!context) return Promise.resolve(false);
+  const needsReactivate = audioNeedsTouchReactivate;
+  audioNeedsTouchReactivate = false;
   audioUnlockedByGesture = true;
-  if (context.state === "running") {
+  if (context.state === "running" && !needsReactivate) {
     finishAudioActivation();
     return Promise.resolve(true);
   }
   return unlockAudio(true);
+}
+
+function markAudioForTouchReactivate() {
+  audioNeedsTouchReactivate = true;
+  audioActivationPrimed = false;
+  audioPrimed = false;
 }
 
 function getAudioOutput() {
