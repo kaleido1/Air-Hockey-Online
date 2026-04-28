@@ -500,6 +500,17 @@ canvas.addEventListener("pointermove", (event) => {
   }
 });
 
+window.addEventListener(
+  "pointermove",
+  (event) => {
+    if (event.target === canvas) return;
+    if (!isDesktopLocalPointer(event)) return;
+    if (suppressedGameplayPointers.has(event.pointerId)) return;
+    sendRelativePointer(event, false, localPointerMalletIndex);
+  },
+  { passive: true }
+);
+
 canvas.addEventListener("pointerup", (event) => {
   pointerDown = false;
   if (suppressedGameplayPointers.delete(event.pointerId)) return;
@@ -2255,6 +2266,10 @@ function isActivePlay() {
 
 function isLocalGame() {
   return Boolean(roomSettings?.local || offlineGame?.mode === "local");
+}
+
+function isDesktopLocalPointer(event) {
+  return isActivePlay() && isLocalGame() && event.pointerType !== "touch";
 }
 
 function isOnlineRoom() {
