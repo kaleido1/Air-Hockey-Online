@@ -37,10 +37,6 @@ const els = {
   leaveButton: document.querySelector("#leaveButton"),
   onePuckButton: document.querySelector("#onePuckButton"),
   twoPuckButton: document.querySelector("#twoPuckButton"),
-  soundGate: document.querySelector("#soundGate"),
-  soundGateTitle: document.querySelector("#soundGateTitle"),
-  soundGateHint: document.querySelector("#soundGateHint"),
-  soundGateButton: document.querySelector("#soundGateButton"),
   eyebrow: document.querySelector(".eyebrow"),
   panelTitle: document.querySelector(".panel h1"),
   joinButton: document.querySelector("#joinForm button"),
@@ -257,8 +253,8 @@ let previousUiScreen = null;
 let uiTransitionStartedAt = performance.now();
 let pendingStartMode = "bot";
 let pendingModeStartAction = null;
-let soundGateActivationPending = false;
 let menuButtons = [];
+const pendingPointerUiActions = new Map();
 let soundEnabled = getInitialSoundEnabled();
 let audioSessionArmed = !isIOS;
 let localPointerMalletIndex = 0;
@@ -361,40 +357,72 @@ function armAudioSessionFromModeButton() {
   soundEnabled = true;
   persistSoundEnabled();
   applyAudioSessionType("playback");
-  primeModeButtonAudioUnlock();
+  if (isIOS) return activateIOSAudioStreamFromGesture();
   return activateAudioFromGesture();
 }
 
-function primeModeButtonAudioUnlock() {
+function startIOSMediaUnlockElement() {
   if (!isIOS) return;
   if (!audioUnlockElement) {
     audioUnlockElement = new Audio();
     audioUnlockElement.preload = "auto";
+    audioUnlockElement.loop = true;
     audioUnlockElement.playsInline = true;
     audioUnlockElement.setAttribute("playsinline", "");
+    audioUnlockElement.setAttribute("webkit-playsinline", "");
     audioUnlockElement.src =
       "data:audio/mp4;base64,AAAAHGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAABBmb2lzbwAAAAhmcmVlAAAAG21kYXQAAAGzABAHAAABthGYSaQAAAGkbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAABdwAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAzF0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAAdwAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAQAAAAEAAAAAAACkbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAyAAAAMgBVxAAAAAAtaGRscgAAAAAAAAAAbWRpcwAAAAAAAAAAU291bmRIYW5kbGVyAAAAAa9taW5mAAAAFHNtaGQAAAAAAAAAAAAAAACRZGluZgAAABxkcmVmAAAAAAAAAAEAAAAMdXJsIAAAAAEAAAGPc3RibAAAAG1zdHNkAAAAAAAAAAEAAABdbXA0YQAAAAAAAAABAAAAAQAAABRlc2RzAAAAA4CAgE8AAgAEgICAQAAACABIAAAAZCAgIAVAQAGgICAARiAgIAEAAAAAHRicnQAAAAAAAMcc3R0cwAAAAAAAAABAAAAAQAAAgAAAAAUc3RzYwAAAAAAAAABAAAAAQAAAAEAAAABAAAAHHN0c3oAAAAAAAAAAAAAAAEAAAB6AAAAFHN0Y28AAAAAAAAAAQAAADY=";
   }
-  audioUnlockElement.muted = true;
-  audioUnlockElement.currentTime = 0;
-  const playPromise = audioUnlockElement.play();
-  if (playPromise && typeof playPromise.then === "function") {
-    playPromise
-      .then(() => {
-        audioUnlockElement.pause();
-        try {
-          audioUnlockElement.currentTime = 0;
-        } catch {
-          // Ignore reset failures on iOS.
-        }
-      })
-      .catch(() => {});
+  // Muted media may satisfy autoplay without opening the audible route on iOS.
+  // Keep a near-silent inline element alive so WebAudio has a warmed session.
+  audioUnlockElement.muted = false;
+  audioUnlockElement.volume = 0.01;
+  try {
+    audioUnlockElement.currentTime = 0;
+  } catch {
+    // Ignore reset failures on iOS.
   }
+  return audioUnlockElement.play();
+}
+
+function stopIOSMediaUnlockElement() {
+  if (!audioUnlockElement) return;
+  audioUnlockElement.pause();
+  try {
+    audioUnlockElement.currentTime = 0;
+  } catch {
+    // Ignore reset failures on iOS.
+  }
+}
+
+function activateIOSAudioStreamFromGesture() {
+  if (!soundEnabled) return Promise.resolve(false);
+  if (audioNeedsFreshContext) resetAudioContext();
+  applyAudioSessionType("playback");
+  const context = ensureAudioContext();
+  if (!context) return Promise.resolve(false);
+  audioNeedsTouchReactivate = false;
+  audioNeedsFreshContext = false;
+  audioUnlockedByGesture = true;
+  const mediaPlayPromise = startIOSMediaUnlockElement();
+  primeAudioActivation();
+  primeAudioContext();
+  if (context.state === "running") {
+    finishAudioActivation();
+    return Promise.resolve(true);
+  }
+  return Promise.allSettled([context.resume(), mediaPlayPromise])
+    .then(() => finishAudioActivation())
+    .catch(() => {
+      audioNeedsFreshContext = true;
+      return false;
+    });
 }
 
 function recoverAudioOnInteraction() {
   if (!audioSessionArmed || !soundEnabled) return Promise.resolve(false);
   if (!audioNeedsTouchReactivate && !audioNeedsFreshContext) return Promise.resolve(false);
+  if (isIOS) return activateIOSAudioStreamFromGesture();
   return activateAudioFromGesture();
 }
 
@@ -426,10 +454,6 @@ els.joinForm.addEventListener("submit", (event) => {
       send({ type: "join", code });
     });
   }
-});
-els.soundGateButton.addEventListener("click", (event) => {
-  event.preventDefault();
-  confirmSoundGate();
 });
 els.copyButton.addEventListener("click", async () => {
   if (!shouldExposeRoomInUrl()) return;
@@ -525,6 +549,7 @@ window.addEventListener(
 canvas.addEventListener("pointerup", (event) => {
   pointerDown = false;
   if (suppressedGameplayPointers.delete(event.pointerId)) {
+    runPendingPointerUiAction(event.pointerId);
     return;
   }
   if (isActivePlay()) {
@@ -542,6 +567,7 @@ window.addEventListener(
     if (!suppressedGameplayPointers.has(event.pointerId)) return;
     pointerDown = false;
     suppressedGameplayPointers.delete(event.pointerId);
+    runPendingPointerUiAction(event.pointerId);
   },
   { passive: true }
 );
@@ -549,6 +575,7 @@ window.addEventListener(
 canvas.addEventListener("pointercancel", () => {
   pointerDown = false;
   suppressedGameplayPointers.clear();
+  pendingPointerUiActions.clear();
   activePointers.clear();
 });
 
@@ -891,9 +918,6 @@ function applyLanguage() {
   els.copyButton.textContent = t("copyLink");
   els.restartButton.textContent = t("restart");
   els.leaveButton.textContent = t("leave");
-  els.soundGateTitle.textContent = t("soundStartTitle");
-  els.soundGateHint.textContent = t("soundStartHint");
-  els.soundGateButton.textContent = t("soundStartButton");
   [t("room"), t("status"), t("ping")].forEach((label, index) => {
     if (els.metaLabels[index]) els.metaLabels[index].textContent = label;
   });
@@ -2168,12 +2192,24 @@ function handleCanvasUi(point, clickCount = 1, event = null) {
       point.y >= button.y &&
       point.y <= button.y + button.h
     ) {
+      if (button.runOnPointerUp && event) {
+        pendingPointerUiActions.set(event.pointerId, button.action);
+        return true;
+      }
       button.action();
       return true;
     }
   }
 
   return Boolean(uiScreen);
+}
+
+function runPendingPointerUiAction(pointerId) {
+  const action = pendingPointerUiActions.get(pointerId);
+  if (!action) return false;
+  pendingPointerUiActions.delete(pointerId);
+  action();
+  return true;
 }
 
 function handleTouchPause(event, point) {
@@ -2265,43 +2301,7 @@ function runWithSoundGate(action) {
     return;
   }
   pendingModeStartAction = action;
-  showSoundGate();
-}
-
-function showSoundGate() {
-  soundGateActivationPending = false;
-  els.soundGateButton.disabled = false;
-  els.soundGate.hidden = false;
-  els.soundGateButton.focus({ preventScroll: true });
-}
-
-function hideSoundGate() {
-  els.soundGate.hidden = true;
-  soundGateActivationPending = false;
-  els.soundGateButton.disabled = false;
-}
-
-function confirmSoundGate() {
-  if (soundGateActivationPending) return;
-  soundGateActivationPending = true;
-  els.soundGateButton.disabled = true;
-  audioSessionArmed = true;
-  soundEnabled = true;
-  persistSoundEnabled();
-  const action = pendingModeStartAction;
-  pendingModeStartAction = null;
-  void armAudioSessionFromModeButton().then((ready) => {
-    if (!ready) {
-      audioSessionArmed = false;
-      pendingModeStartAction = action;
-      soundGateActivationPending = false;
-      els.soundGateButton.disabled = false;
-      return;
-    }
-    hideSoundGate();
-    playFx("hit", 0.18);
-    if (action) action();
-  });
+  showUi("sound");
 }
 
 function isActivePlay() {
@@ -2376,6 +2376,7 @@ function getWaitingHintText() {
 function clearControls() {
   pointerDown = false;
   suppressedGameplayPointers.clear();
+  pendingPointerUiActions.clear();
   activePointers.clear();
   lastCenterTapAt = 0;
   localPointerMalletIndex = 0;
@@ -2816,6 +2817,7 @@ function drawUiScreen(screen, offsetY, alpha, interactive) {
   if (screen === "online") drawOnlineMenu(interactive);
   if (screen === "waiting") drawWaitingMenu(interactive);
   if (screen === "notice") drawNoticeMenu(interactive);
+  if (screen === "sound") drawSoundGateMenu(interactive);
 
   ctx.restore();
 }
@@ -2908,6 +2910,41 @@ function drawLanguageButton(interactive) {
   ctx.fillText(t("languageButton"), button.x + button.w / 2, button.y + button.h / 2 + 1);
   ctx.restore();
   if (interactive) addButton(button, toggleLanguage);
+}
+
+function drawSoundGateMenu(interactive) {
+  const x = 64;
+  const y = 354;
+  const w = 462;
+  const h = 264;
+  drawBluePanel(x, y, w, h, 24);
+
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#ffffff";
+  ctx.shadowColor = "rgba(0,0,0,0.42)";
+  ctx.shadowBlur = 3;
+  ctx.shadowOffsetY = 2;
+  ctx.font = "900 42px Arial, sans-serif";
+  ctx.fillText(t("soundStartTitle"), x + w / 2, y + 62);
+  ctx.font = "700 22px Arial, sans-serif";
+  ctx.fillText(t("soundStartHint"), x + w / 2, y + 112);
+  ctx.restore();
+
+  const start = { x: x + 26, y: y + 156, w: w - 52, h: 64 };
+  drawRedButton(start.x, start.y, start.w, start.h, t("soundStartButton"), 25);
+
+  if (interactive) {
+    addReleaseButton(start, () => {
+      const action = pendingModeStartAction;
+      pendingModeStartAction = null;
+      void armAudioSessionFromModeButton().then((ready) => {
+        if (ready) playFx("hit", 0.18);
+      });
+      if (action) action();
+    });
+  }
 }
 
 function drawPuckMenu(interactive) {
@@ -3145,12 +3182,13 @@ function drawPauseOverlay() {
     if (!soundEnabled) {
       applyAudioSessionType("auto");
       stopAudioKeepAlive();
+      stopIOSMediaUnlockElement();
       if (audio) audio.suspend();
     }
     if (soundEnabled) {
       audioSessionArmed = true;
       applyAudioSessionType("playback");
-      void activateAudioFromGesture();
+      void (isIOS ? activateIOSAudioStreamFromGesture() : activateAudioFromGesture());
     }
   });
 }
@@ -3529,6 +3567,10 @@ function drawStatusPill(text) {
 
 function addButton(rect, action) {
   menuButtons.push({ ...rect, action });
+}
+
+function addReleaseButton(rect, action) {
+  menuButtons.push({ ...rect, action, runOnPointerUp: true });
 }
 
 async function copyInviteLink() {
