@@ -1081,6 +1081,11 @@ function startSelectedMode(count) {
     send({ type: "local", puckCount: count });
     setStatus("");
     showUi(null);
+  } else if (pendingStartMode === "lan") {
+    clearRoomUrl();
+    send({ type: "lan", puckCount: count });
+    setStatus("waitingOtherPlayer");
+    showUi("waiting");
   } else if (pendingStartMode === "online") {
     clearRoomUrl();
     if (pendingRoomFromUrl) {
@@ -1386,7 +1391,7 @@ function drawMainMenu(interactive) {
       }
       clearRoomUrl();
       pendingStartMode = "lan";
-      showUi("lan");
+      showUi("puck");
     },
     () => {
       unlockAudio();
