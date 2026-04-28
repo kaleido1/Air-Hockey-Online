@@ -231,6 +231,7 @@ const remoteMalletSamples = [[], []];
 let roomPlayers = null;
 let pendingRoomFromUrl = new URLSearchParams(location.search).get("room") || "";
 let pointerDown = false;
+const suppressedGameplayPointers = new Set();
 const lastInputAtByPlayer = [0, 0];
 let lastPingSentAt = 0;
 let reconnectTimer = 0;
@@ -438,6 +439,7 @@ canvas.addEventListener("pointerdown", (event) => {
   measureCanvas();
   const point = eventToCanvas(event);
   if (point && handleCanvasUi(point, event.detail || 1)) {
+    suppressedGameplayPointers.add(event.pointerId);
     pointerDown = false;
     try {
       canvas.releasePointerCapture(event.pointerId);
@@ -447,6 +449,7 @@ canvas.addEventListener("pointerdown", (event) => {
     return;
   }
   if (point && handleTouchPause(event, point)) {
+    suppressedGameplayPointers.add(event.pointerId);
     pointerDown = false;
     try {
       canvas.releasePointerCapture(event.pointerId);
@@ -476,6 +479,7 @@ canvas.addEventListener(
 
 canvas.addEventListener("pointermove", (event) => {
   if (!isActivePlay()) return;
+  if (suppressedGameplayPointers.has(event.pointerId)) return;
   if (isLocalGame()) {
     if (event.pointerType === "touch") {
       const localIndex = activePointers.get(event.pointerId);
@@ -490,6 +494,7 @@ canvas.addEventListener("pointermove", (event) => {
 
 canvas.addEventListener("pointerup", (event) => {
   pointerDown = false;
+  if (suppressedGameplayPointers.delete(event.pointerId)) return;
   if (isActivePlay()) {
     if (!(isLocalGame() && event.pointerType !== "touch")) {
       const localIndex = activePointers.get(event.pointerId);
@@ -501,6 +506,7 @@ canvas.addEventListener("pointerup", (event) => {
 
 canvas.addEventListener("pointercancel", () => {
   pointerDown = false;
+  suppressedGameplayPointers.clear();
   activePointers.clear();
 });
 
@@ -2283,6 +2289,7 @@ function getWaitingHintText() {
 
 function clearControls() {
   pointerDown = false;
+  suppressedGameplayPointers.clear();
   activePointers.clear();
   lastCenterTapAt = 0;
   localPointerMalletIndex = 0;
