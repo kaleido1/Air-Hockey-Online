@@ -93,6 +93,7 @@ const translations = {
     back: "返回",
     waitingOtherPlayer: "等待另一名玩家",
     waitingOtherPlayerJoin: "等待另一名玩家加入",
+    wirelessPuckMismatch: "当前无线对战正在等待另一种球数设置，请与对方选择一致后再加入",
     readyToStart: "准备开始",
     waitingJoin: "等待对手加入",
     backMenu: "返回菜单",
@@ -161,6 +162,7 @@ const translations = {
     back: "Back",
     waitingOtherPlayer: "Waiting for another player",
     waitingOtherPlayerJoin: "Waiting for another player",
+    wirelessPuckMismatch: "This wireless match is waiting for a different puck count. Choose the same mode as the other player.",
     readyToStart: "Ready",
     waitingJoin: "Waiting for opponent",
     backMenu: "Back to Menu",
@@ -510,6 +512,9 @@ function handleMessage(message) {
       setStatus(message.message || "notice");
       break;
     case "error":
+      if (message.returnToMenu) {
+        clearRoom();
+      }
       setUiNotice(message.message || "unableJoin");
       setStatus(message.message || "error");
       break;
