@@ -42,8 +42,9 @@ const WALL_RESTITUTION = 0.94;
 const PUCK_RESTITUTION = 0.85;
 const MALLET_RESTITUTION = 0.80;
 const MALLET_STRIKE_TRANSFER = 0.62;
-const MALLET_HIT_COOLDOWN_MS = 28;
+const MALLET_HIT_COOLDOWN_MS = 45;
 const CONTACT_SEPARATION = 0.12;
+const HARD_CONTACT_SEPARATION = 1.0;
 const CONTACT_SLOP = 0.04;
 const STATIC_PUCK_SPEED = 70;
 const STATIC_STRIKE_MIN_SPEED = 520;
@@ -54,7 +55,7 @@ const STRIKE_ESCAPE_TRANSFER = 0.42;
 const PUCK_SUBSTEPS = 18;
 const IMMEDIATE_HIT_STATE_GAP_MS = 4;
 const INPUT_STATE_GAP_MS = 8;
-const MALLET_RELEASE_LOCK_MS = 72;
+const MALLET_RELEASE_LOCK_MS = 48;
 const FRICTION_PER_SECOND = 0.991;
 const STUCK_SPEED = 95;
 const STUCK_SECONDS = 0.38;
@@ -1061,21 +1062,7 @@ function forceSeparatePuckFromMallet(room, puck, mallet, malletIndex = null) {
 
   const release = getActiveMalletRelease(puck, malletIndex);
   if (release) {
-    const projectedDistance = (puck.x - mallet.x) * release.nx + (puck.y - mallet.y) * release.ny;
-    if (projectedDistance >= minDistance + CONTACT_SEPARATION) return;
-
-    const overlap = minDistance + CONTACT_SEPARATION - projectedDistance + 0.18;
-    puck.x += release.nx * overlap;
-    puck.y += release.ny * overlap;
-    const normalSpeed = puck.vx * release.nx + puck.vy * release.ny;
-    const malletReleaseSpeed = Math.max(0, mallet.vx * release.nx + mallet.vy * release.ny);
-    const escapeSpeed = Math.max(EDGE_BLOCK_RESPONSE_SPEED, malletReleaseSpeed * MALLET_STRIKE_TRANSFER);
-    if (normalSpeed < escapeSpeed) {
-      const correction = escapeSpeed - normalSpeed;
-      puck.vx += release.nx * correction;
-      puck.vy += release.ny * correction;
-      capPuckSpeed(puck);
-    }
+    maintainMalletLeavingState(room, puck, mallet, release);
     return;
   }
 
@@ -1136,6 +1123,31 @@ function getActiveMalletRelease(puck, malletIndex, now = Date.now()) {
   };
 }
 
+function maintainMalletLeavingState(room, puck, mallet, release) {
+  const minDistance = TABLE.puckRadius + TABLE.malletRadius;
+  const targetDistance = minDistance + HARD_CONTACT_SEPARATION;
+  const projectedDistance = (puck.x - mallet.x) * release.nx + (puck.y - mallet.y) * release.ny;
+  if (projectedDistance < targetDistance) {
+    const correction = targetDistance - projectedDistance;
+    puck.x += release.nx * correction;
+    puck.y += release.ny * correction;
+  }
+
+  const normalSpeed = puck.vx * release.nx + puck.vy * release.ny;
+  const malletReleaseSpeed = Math.max(0, mallet.vx * release.nx + mallet.vy * release.ny);
+  const escapeSpeed = Math.max(EDGE_BLOCK_RESPONSE_SPEED, malletReleaseSpeed * MALLET_STRIKE_TRANSFER);
+  if (normalSpeed < escapeSpeed) {
+    const correction = escapeSpeed - normalSpeed;
+    puck.vx += release.nx * correction;
+    puck.vy += release.ny * correction;
+    capPuckSpeed(puck);
+  }
+
+  puck.prevX = puck.x;
+  puck.prevY = puck.y;
+  if (room) room.updatedAt = Date.now();
+}
+
 function rememberMalletRelease(puck, malletIndex, nx, ny, now = Date.now()) {
   const length = Math.hypot(nx, ny);
   if (length <= 0.001) return;
@@ -1148,6 +1160,12 @@ function rememberMalletRelease(puck, malletIndex, nx, ny, now = Date.now()) {
 function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   const minDistance = TABLE.puckRadius + TABLE.malletRadius;
   const now = Date.now();
+  const activeRelease = getActiveMalletRelease(puck, malletIndex, now);
+  if (activeRelease) {
+    maintainMalletLeavingState(room, puck, mallet, activeRelease);
+    return false;
+  }
+
   const startX = Number.isFinite(mallet.sweepFromX) ? mallet.sweepFromX : mallet.x;
   const startY = Number.isFinite(mallet.sweepFromY) ? mallet.sweepFromY : mallet.y;
   const puckStartX = Number.isFinite(puck.prevX) ? puck.prevX : puck.x;
@@ -1230,24 +1248,8 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
 
   let nx = dx / distance;
   let ny = dy / distance;
-  const release = getActiveMalletRelease(puck, malletIndex, now);
-  if (release) {
-    const releaseDistance = (probeX - contactX) * release.nx + (probeY - contactY) * release.ny;
-    const releaseSpeed = puck.vx * release.nx + puck.vy * release.ny;
-    const malletReleaseSpeed = strikeVx * release.nx + strikeVy * release.ny;
-    const alreadyReleased =
-      releaseDistance >= minDistance - CONTACT_SLOP &&
-      releaseSpeed >= EDGE_BLOCK_RESPONSE_SPEED &&
-      malletReleaseSpeed <= releaseSpeed + 80;
-    if (alreadyReleased) return false;
-    if (releaseDistance > minDistance * 0.42) {
-      nx = release.nx;
-      ny = release.ny;
-    }
-  }
-
-  puck.x = contactX + nx * (minDistance + CONTACT_SEPARATION);
-  puck.y = contactY + ny * (minDistance + CONTACT_SEPARATION);
+  puck.x = contactX + nx * (minDistance + HARD_CONTACT_SEPARATION);
+  puck.y = contactY + ny * (minDistance + HARD_CONTACT_SEPARATION);
 
   const rvx = puck.vx - strikeVx;
   const rvy = puck.vy - strikeVy;
@@ -1278,8 +1280,8 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
     exitY = blendedY / blendedLength;
     const anchorX = sweptHit ? contactX : mallet.x;
     const anchorY = sweptHit ? contactY : mallet.y;
-    puck.x = anchorX + exitX * (minDistance + CONTACT_SEPARATION);
-    puck.y = anchorY + exitY * (minDistance + CONTACT_SEPARATION);
+    puck.x = anchorX + exitX * (minDistance + HARD_CONTACT_SEPARATION);
+    puck.y = anchorY + exitY * (minDistance + HARD_CONTACT_SEPARATION);
   }
   if (!sweptHit && distance > minDistance && relativeNormalSpeed >= -15 && !strongDrive) {
     return false;
@@ -2264,6 +2266,65 @@ export function runMalletReleaseLockSelfTest() {
     passed:
       releaseDistance >= TABLE.malletRadius + TABLE.puckRadius + CONTACT_SEPARATION &&
       releaseSpeed >= EDGE_BLOCK_RESPONSE_SPEED
+  };
+}
+
+export function runDoubleHitDebounceSelfTest() {
+  const now = Date.now();
+  const room = {
+    state: {
+      pucks: [],
+      mallets: []
+    },
+    players: [],
+    lastFxAt: new Map(),
+    updatedAt: now
+  };
+  const mallet = {
+    x: 290,
+    y: 760,
+    vx: 2600,
+    vy: 0,
+    targetX: 290,
+    targetY: 760,
+    sweepFromX: 110,
+    sweepFromY: 760,
+    sweepStartedAt: now - 8,
+    hasPendingSweep: true
+  };
+  const puck = {
+    id: "double-hit",
+    x: 222,
+    y: 760,
+    prevX: 222,
+    prevY: 760,
+    vx: 0,
+    vy: 0,
+    stuckFor: 0,
+    lastMalletHitIndex: null,
+    lastMalletHitAt: 0
+  };
+  room.state.mallets = [mallet];
+  room.state.pucks = [puck];
+
+  const firstHit = collidePuckWithMallet(room, puck, mallet, 0, 1 / PHYSICS_HZ);
+  const speedAfterFirst = Math.hypot(puck.vx, puck.vy);
+  const secondHit = collidePuckWithMallet(room, puck, mallet, 0, 1 / PHYSICS_HZ);
+  const speedAfterSecond = Math.hypot(puck.vx, puck.vy);
+  const distance = Math.hypot(puck.x - mallet.x, puck.y - mallet.y);
+  const minDistance = TABLE.malletRadius + TABLE.puckRadius;
+
+  return {
+    firstHit: Boolean(firstHit),
+    secondHit: Boolean(secondHit),
+    speedAfterFirst,
+    speedAfterSecond,
+    distance,
+    passed:
+      Boolean(firstHit) &&
+      !secondHit &&
+      speedAfterSecond <= speedAfterFirst + 1 &&
+      distance >= minDistance + HARD_CONTACT_SEPARATION - 0.001
   };
 }
 

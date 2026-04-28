@@ -268,10 +268,11 @@ let canvasMetrics = null;
 let currentCursor = "";
 const predictedMallets = new Map();
 const LOCAL_PREDICTION_WINDOW_MS = 90;
-const LOCAL_PREDICTION_RELEASE_MS = 72;
-const LOCAL_REHIT_SUPPRESSION_MS = 10;
+const LOCAL_PREDICTION_RELEASE_MS = 48;
+const LOCAL_REHIT_SUPPRESSION_MS = 45;
 const LOCAL_BLOCK_INPUT_GRACE_MS = 58;
 const LOCAL_CONTACT_SEPARATION = 0.12;
+const LOCAL_HARD_CONTACT_SEPARATION = 1.0;
 const LOCAL_CONTACT_SLOP = 1.4;
 const LOCAL_BLOCK_RELEASE_SPEED = 180;
 const ENABLE_LOCAL_PUCK_PREDICTION = true;
@@ -1117,8 +1118,8 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
       exitY = blendedY / blendedLength;
     }
 
-    puck.x = contactMalletX + exitX * (minDistance + LOCAL_CONTACT_SEPARATION);
-    puck.y = contactMalletY + exitY * (minDistance + LOCAL_CONTACT_SEPARATION);
+    puck.x = contactMalletX + exitX * (minDistance + LOCAL_HARD_CONTACT_SEPARATION);
+    puck.y = contactMalletY + exitY * (minDistance + LOCAL_HARD_CONTACT_SEPARATION);
 
     const strike = Math.min(820, Math.max(staticKick, 180 + malletSpeed * 0.12));
     puck.vx = exitX * strike + moveX * sweepKick + sweepX * 9.5;
@@ -1586,6 +1587,7 @@ function maybePredictLocalBlockContact(puck, state) {
   if (!ENABLE_LOCAL_PUCK_PREDICTION || serverState?.phase !== "playing") return;
   if (!puck || localPredictedPucks.has(puck.id)) return;
   const now = performance.now();
+  if (puck.localPredictedAt && now - puck.localPredictedAt < LOCAL_REHIT_SUPPRESSION_MS) return;
   const minDistance = TABLE.malletRadius + TABLE.puckRadius;
 
   for (const index of controlledMalletIndices()) {
@@ -1625,8 +1627,8 @@ function maybePredictLocalBlockContact(puck, state) {
     }
 
     localPredictedPucks.set(puck.id, {
-      x: mallet.x + nx * (minDistance + LOCAL_CONTACT_SEPARATION),
-      y: mallet.y + ny * (minDistance + LOCAL_CONTACT_SEPARATION),
+      x: mallet.x + nx * (minDistance + LOCAL_HARD_CONTACT_SEPARATION),
+      y: mallet.y + ny * (minDistance + LOCAL_HARD_CONTACT_SEPARATION),
       vx,
       vy,
       inputSeq: mallet.inputSeq || 0,
