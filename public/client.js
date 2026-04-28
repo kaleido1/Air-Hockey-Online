@@ -56,7 +56,6 @@ const colors = {
 };
 
 const LANGUAGE_STORAGE_KEY = "air-hockey-online-language";
-const SOUND_ENABLED_STORAGE_KEY = "air-hockey-online-sound-enabled-v2";
 const translations = {
   zh: {
     you: "你",
@@ -672,22 +671,7 @@ function getInitialLanguage() {
 }
 
 function getInitialSoundEnabled() {
-  try {
-    const saved = localStorage.getItem(SOUND_ENABLED_STORAGE_KEY);
-    if (saved === "false") return false;
-    if (saved === "true") return true;
-  } catch {
-    // Ignore storage failures and keep sound enabled by default.
-  }
   return true;
-}
-
-function persistSoundEnabled() {
-  try {
-    localStorage.setItem(SOUND_ENABLED_STORAGE_KEY, String(soundEnabled));
-  } catch {
-    // Ignore storage failures for this session.
-  }
 }
 
 function t(key) {
@@ -1763,7 +1747,6 @@ function drawPauseOverlay() {
   addButton({ x: 124, y: 22, w: 342, h: 116 }, exitToMain);
   addButton({ x: 62, y: 686, w: 172, h: 150 }, () => {
     soundEnabled = !soundEnabled;
-    persistSoundEnabled();
     if (!soundEnabled) {
       applyAudioSessionType("auto");
       stopAudioKeepAlive();
