@@ -1113,12 +1113,17 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   if (!sweptHit && distance >= collisionDistance) return false;
 
   if (distance <= 0.001) {
-    dx = puck.x - mallet.x;
-    dy = puck.y - mallet.y;
+    if (sweptHit) {
+      dx = -relativeDeltaX;
+      dy = -relativeDeltaY;
+    } else {
+      dx = puck.x - mallet.x;
+      dy = puck.y - mallet.y;
+    }
     distance = Math.hypot(dx, dy);
     if (distance <= 0.001) {
-      dx = 0;
-      dy = -1;
+      dx = strikeVx || sweepX || 0;
+      dy = strikeVy || sweepY || -1;
       distance = 1;
     }
   }
@@ -1143,6 +1148,8 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   const strikeSpeed = Math.max(0, strikeVx * nx + strikeVy * ny);
   const malletSpeed = Math.hypot(strikeVx, strikeVy);
   const strongDrive = strikeSpeed >= STRONG_STRIKE_MIN_SPEED || malletSpeed >= 520;
+  const sweepDriveSpeed =
+    sweptHit && malletSpeed > 0.001 ? Math.max(strikeSpeed, malletSpeed * 0.42) : strikeSpeed;
   const moveX = malletSpeed > 0.001 ? strikeVx / malletSpeed : nx;
   const moveY = malletSpeed > 0.001 ? strikeVy / malletSpeed : ny;
   const puckSpeed = Math.hypot(puck.vx, puck.vy);
@@ -1207,12 +1214,22 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
     const targetNormalSpeed = Math.max(
       PUCK_MIN_LIVE_SPEED,
       activeStaticPush ? STATIC_STRIKE_MIN_SPEED : 0,
-      strikeSpeed * MALLET_STRIKE_TRANSFER
+      sweepDriveSpeed * MALLET_STRIKE_TRANSFER
     );
     if (puckNormalSpeed < targetNormalSpeed) {
       const carry = targetNormalSpeed - puckNormalSpeed;
       puck.vx += nx * carry;
       puck.vy += ny * carry;
+    }
+  }
+
+  if (sweptHit && malletSpeed > 320) {
+    const puckTravelAlongMove = puck.vx * moveX + puck.vy * moveY;
+    const minimumTravel = Math.max(220, malletSpeed * 0.24);
+    if (puckTravelAlongMove < minimumTravel) {
+      const carry = minimumTravel - puckTravelAlongMove;
+      puck.vx += moveX * carry;
+      puck.vy += moveY * carry;
     }
   }
 
