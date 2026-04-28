@@ -233,7 +233,7 @@ let previousUiScreen = null;
 let uiTransitionStartedAt = performance.now();
 let pendingStartMode = "bot";
 let menuButtons = [];
-let soundEnabled = getInitialSoundEnabled();
+let soundEnabled = false;
 let audioSessionArmed = false;
 let localPointerMalletIndex = 0;
 let lastPhase = null;
@@ -306,7 +306,8 @@ window.addEventListener("pageshow", () => {
 
 function armAudioSessionFromModeButton() {
   audioSessionArmed = true;
-  if (!soundEnabled) return Promise.resolve(false);
+  soundEnabled = true;
+  applyAudioSessionType("playback");
   primeModeButtonAudioUnlock();
   return activateAudioFromGesture();
 }
@@ -668,10 +669,6 @@ function getInitialLanguage() {
     // Ignore storage failures in private browsing modes.
   }
   return navigator.language?.toLowerCase().startsWith("zh") ? "zh" : "en";
-}
-
-function getInitialSoundEnabled() {
-  return true;
 }
 
 function t(key) {
