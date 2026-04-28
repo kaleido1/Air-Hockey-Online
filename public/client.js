@@ -214,7 +214,9 @@ let lastPingSentAt = 0;
 let reconnectTimer = 0;
 let heartbeatTimer = 0;
 let audio = null;
+let audioMasterGain = null;
 let audioPrimed = false;
+let audioUnlockPromise = null;
 let statusRaw = "chooseMode";
 let statusText = t("chooseMode");
 const playerKey = getPlayerKey();
@@ -267,6 +269,7 @@ window.addEventListener("pointerdown", unlockAudio, { capture: true, passive: tr
 window.addEventListener("touchstart", unlockAudio, { capture: true, passive: true });
 window.addEventListener("mousedown", unlockAudio, { capture: true, passive: true });
 window.addEventListener("keydown", unlockAudio, { capture: true });
+window.addEventListener("pageshow", unlockAudio, { passive: true });
 
 els.onePuckButton.addEventListener("click", () => setPuckCount(1));
 els.twoPuckButton.addEventListener("click", () => setPuckCount(2));
@@ -2441,30 +2444,74 @@ function roundRect(x, y, width, height, radius, fillStyle) {
   ctx.restore();
 }
 
+function ensureAudioContext() {
+  if (audio) return audio;
+  const AudioCtor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtor) return null;
+  audio = new AudioCtor();
+  audioMasterGain = audio.createGain();
+  audioMasterGain.gain.value = 0.92;
+  audioMasterGain.connect(audio.destination);
+  return audio;
+}
+
+function getAudioOutput() {
+  return audioMasterGain || audio?.destination || null;
+}
+
+function primeAudioContext() {
+  if (!audio || !getAudioOutput() || audioPrimed) return;
+  const now = audio.currentTime;
+  const gain = audio.createGain();
+  gain.gain.setValueAtTime(0.00001, now);
+  gain.gain.exponentialRampToValueAtTime(0.00002, now + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.00001, now + 0.08);
+  gain.connect(getAudioOutput());
+
+  const oscillator = audio.createOscillator();
+  oscillator.type = "sine";
+  oscillator.frequency.setValueAtTime(440, now);
+  oscillator.connect(gain);
+  oscillator.start(now);
+  oscillator.stop(now + 0.06);
+  audioPrimed = true;
+}
+
 function unlockAudio() {
-  if (!audio) {
-    audio = new (window.AudioContext || window.webkitAudioContext)();
+  if (!soundEnabled) return Promise.resolve(false);
+  const context = ensureAudioContext();
+  if (!context) return Promise.resolve(false);
+
+  if (context.state === "running") {
+    primeAudioContext();
+    return Promise.resolve(true);
   }
-  if (audio.state === "suspended") {
-    void audio.resume();
+
+  if (!audioUnlockPromise) {
+    audioUnlockPromise = context
+      .resume()
+      .then(() => {
+        if (context.state === "running") primeAudioContext();
+        return context.state === "running";
+      })
+      .catch(() => false)
+      .finally(() => {
+        audioUnlockPromise = null;
+      });
   }
-  if (!audioPrimed) {
-    const gain = audio.createGain();
-    gain.gain.value = 0.00001;
-    gain.connect(audio.destination);
-    const buffer = audio.createBuffer(1, 1, audio.sampleRate);
-    const source = audio.createBufferSource();
-    source.buffer = buffer;
-    source.connect(gain);
-    source.start();
-    audioPrimed = true;
-  }
+
+  return audioUnlockPromise;
 }
 
 function playFx(kind, intensity = 0.5) {
   if (!soundEnabled) return;
-  unlockAudio();
-  if (!audio || audio.state !== "running") return;
+  const unlock = unlockAudio();
+  if (!audio || audio.state !== "running") {
+    void unlock.then((ready) => {
+      if (ready && audio?.state === "running") playFx(kind, intensity);
+    });
+    return;
+  }
   const now = audio.currentTime;
   const force = clamp(Number(intensity) || 0.5, 0, 1);
 
@@ -2488,7 +2535,7 @@ function playFx(kind, intensity = 0.5) {
 
 function playIceClick(start, intensity, resonance, duration) {
   const bodyGain = audio.createGain();
-  bodyGain.connect(audio.destination);
+  bodyGain.connect(getAudioOutput());
   bodyGain.gain.setValueAtTime(0.0001, start);
   bodyGain.gain.exponentialRampToValueAtTime(0.02 + intensity * 0.075, start + 0.008);
   bodyGain.gain.exponentialRampToValueAtTime(0.0001, start + duration + 0.035);
@@ -2509,7 +2556,7 @@ function playIceClick(start, intensity, resonance, duration) {
   noise.stop(start + duration + 0.05);
 
   const thumpGain = audio.createGain();
-  thumpGain.connect(audio.destination);
+  thumpGain.connect(getAudioOutput());
   thumpGain.gain.setValueAtTime(0.0001, start);
   thumpGain.gain.exponentialRampToValueAtTime(0.03 + intensity * 0.08, start + 0.006);
   thumpGain.gain.exponentialRampToValueAtTime(0.0001, start + duration * 0.95);
@@ -2523,7 +2570,7 @@ function playIceClick(start, intensity, resonance, duration) {
   thump.stop(start + duration);
 
   const ringGain = audio.createGain();
-  ringGain.connect(audio.destination);
+  ringGain.connect(getAudioOutput());
   ringGain.gain.setValueAtTime(0.0001, start + 0.002);
   ringGain.gain.exponentialRampToValueAtTime(0.012 + intensity * 0.032, start + 0.01);
   ringGain.gain.exponentialRampToValueAtTime(0.0001, start + duration * 0.72);
@@ -2532,7 +2579,7 @@ function playIceClick(start, intensity, resonance, duration) {
 
 function playGoalDrop(start) {
   const gain = audio.createGain();
-  gain.connect(audio.destination);
+  gain.connect(getAudioOutput());
   gain.gain.setValueAtTime(0.0001, start);
   gain.gain.exponentialRampToValueAtTime(0.18, start + 0.025);
   gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.62);
@@ -2551,7 +2598,7 @@ function playGoalDrop(start) {
 
 function playVictoryCheer(start) {
   const cheerGain = audio.createGain();
-  cheerGain.connect(audio.destination);
+  cheerGain.connect(getAudioOutput());
   cheerGain.gain.setValueAtTime(0.0001, start);
   cheerGain.gain.exponentialRampToValueAtTime(0.12, start + 0.05);
   cheerGain.gain.exponentialRampToValueAtTime(0.0001, start + 1.15);
