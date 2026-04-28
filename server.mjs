@@ -50,6 +50,8 @@ const EDGE_BLOCK_RESPONSE_SPEED = 48;
 const STRONG_STRIKE_MIN_SPEED = 180;
 const STRIKE_ESCAPE_TRANSFER = 0.42;
 const PUCK_SUBSTEPS = 18;
+const INPUT_SWEEP_STEP_PIXELS = 18;
+const MAX_INPUT_SWEEP_STEPS = 12;
 const FRICTION_PER_SECOND = 0.991;
 const STUCK_SPEED = 95;
 const STUCK_SECONDS = 0.38;
@@ -760,27 +762,73 @@ function updateInput(client, message) {
   const inputDt = clamp(elapsed, 1 / 240, 1 / 24);
   const speed = Math.hypot(dx, dy) / inputDt;
   const velocityScale = speed > HUMAN_MALLET_MAX_SPEED ? HUMAN_MALLET_MAX_SPEED / speed : 1;
+  const baseVx = (dx / inputDt) * velocityScale;
+  const baseVy = (dy / inputDt) * velocityScale;
   if (!mallet.hasPendingSweep) {
     mallet.sweepFromX = previousX;
     mallet.sweepFromY = previousY;
     mallet.sweepStartedAt = mallet.lastInputAt || now - inputDt * 1000;
     mallet.hasPendingSweep = true;
   }
-  mallet.x = constrained.x;
-  mallet.y = constrained.y;
+  if (room.state.phase === "playing" && Math.hypot(dx, dy) > 0.001) {
+    applyDirectInputSweep(
+      room,
+      mallet,
+      playerIndex,
+      constrained.x,
+      constrained.y,
+      inputDt,
+      now,
+      baseVx,
+      baseVy
+    );
+  } else {
+    mallet.x = constrained.x;
+    mallet.y = constrained.y;
+  }
   mallet.targetX = constrained.x;
   mallet.targetY = constrained.y;
-  mallet.vx = (dx / inputDt) * velocityScale;
-  mallet.vy = (dy / inputDt) * velocityScale;
+  mallet.vx = baseVx;
+  mallet.vy = baseVy;
   mallet.lastInputAt = now;
   mallet.directInputUntil = now + 90;
   client.lastInputSeq = Number(message.inputSeq) || client.lastInputSeq || 0;
 
-  if (room.state.phase === "playing") {
-    resolveInputHits(room, mallet, playerIndex, inputDt);
+  room.updatedAt = now;
+}
+
+function applyDirectInputSweep(room, mallet, malletIndex, targetX, targetY, inputDt, now, baseVx, baseVy) {
+  const startX = mallet.x;
+  const startY = mallet.y;
+  const totalDx = targetX - startX;
+  const totalDy = targetY - startY;
+  const distance = Math.hypot(totalDx, totalDy);
+  const steps = clamp(Math.ceil(distance / INPUT_SWEEP_STEP_PIXELS), 1, MAX_INPUT_SWEEP_STEPS);
+  const stepDt = inputDt / steps;
+  const startedAt = now - inputDt * 1000;
+  let anyHit = false;
+
+  for (let step = 1; step <= steps; step += 1) {
+    const previousX = mallet.x;
+    const previousY = mallet.y;
+    mallet.sweepFromX = previousX;
+    mallet.sweepFromY = previousY;
+    mallet.sweepStartedAt = startedAt + (step - 1) * stepDt * 1000;
+    mallet.hasPendingSweep = true;
+    mallet.x = lerp(startX, targetX, step / steps);
+    mallet.y = lerp(startY, targetY, step / steps);
+    mallet.vx = baseVx;
+    mallet.vy = baseVy;
+    anyHit = resolveInputHits(room, mallet, malletIndex, stepDt, false) || anyHit;
+
+    for (const puck of room.state.pucks) {
+      forceSeparatePuckFromMallet(room, puck, mallet);
+      collidePuckWithWalls(room, puck);
+      capPuckSpeed(puck);
+    }
   }
 
-  room.updatedAt = now;
+  if (anyHit) sendRoomState(room, now, true);
 }
 
 function tickRooms() {
@@ -856,7 +904,7 @@ function moveMallets(state, dt) {
   }
 }
 
-function resolveInputHits(room, mallet, malletIndex, dt) {
+function resolveInputHits(room, mallet, malletIndex, dt, emitState = true) {
   let anyHit = false;
   for (const puck of room.state.pucks) {
     const hit = collidePuckWithMallet(room, puck, mallet, malletIndex, dt);
@@ -867,7 +915,8 @@ function resolveInputHits(room, mallet, malletIndex, dt) {
     capPuckSpeed(puck);
     emitFx(room, "hit", false, hit);
   }
-  if (anyHit) sendRoomState(room, Date.now(), true);
+  if (anyHit && emitState) sendRoomState(room, Date.now(), true);
+  return anyHit;
 }
 
 function stepPucks(room, dt) {
