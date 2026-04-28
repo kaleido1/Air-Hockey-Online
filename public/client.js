@@ -242,6 +242,7 @@ let phaseChangedAt = performance.now();
 let gameoverReturnTimer = 0;
 let audioKeepAliveSource = null;
 let audioKeepAliveGain = null;
+let audioUnlockElement = null;
 const activePointers = new Map();
 const touchCapable = navigator.maxTouchPoints > 0 || "ontouchstart" in window;
 let lastCenterTapAt = 0;
@@ -307,7 +308,35 @@ window.addEventListener("pageshow", () => {
 function armAudioSessionFromModeButton() {
   audioSessionArmed = true;
   if (!soundEnabled) return Promise.resolve(false);
+  primeModeButtonAudioUnlock();
   return activateAudioFromGesture();
+}
+
+function primeModeButtonAudioUnlock() {
+  if (!isIOS) return;
+  if (!audioUnlockElement) {
+    audioUnlockElement = new Audio();
+    audioUnlockElement.preload = "auto";
+    audioUnlockElement.playsInline = true;
+    audioUnlockElement.setAttribute("playsinline", "");
+    audioUnlockElement.src =
+      "data:audio/mp4;base64,AAAAHGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAABBmb2lzbwAAAAhmcmVlAAAAG21kYXQAAAGzABAHAAABthGYSaQAAAGkbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAABdwAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAzF0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAAdwAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAQAAAAEAAAAAAACkbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAyAAAAMgBVxAAAAAAtaGRscgAAAAAAAAAAbWRpcwAAAAAAAAAAU291bmRIYW5kbGVyAAAAAa9taW5mAAAAFHNtaGQAAAAAAAAAAAAAAACRZGluZgAAABxkcmVmAAAAAAAAAAEAAAAMdXJsIAAAAAEAAAGPc3RibAAAAG1zdHNkAAAAAAAAAAEAAABdbXA0YQAAAAAAAAABAAAAAQAAABRlc2RzAAAAA4CAgE8AAgAEgICAQAAACABIAAAAZCAgIAVAQAGgICAARiAgIAEAAAAAHRicnQAAAAAAAMcc3R0cwAAAAAAAAABAAAAAQAAAgAAAAAUc3RzYwAAAAAAAAABAAAAAQAAAAEAAAABAAAAHHN0c3oAAAAAAAAAAAAAAAEAAAB6AAAAFHN0Y28AAAAAAAAAAQAAADY=";
+  }
+  audioUnlockElement.muted = true;
+  audioUnlockElement.currentTime = 0;
+  const playPromise = audioUnlockElement.play();
+  if (playPromise && typeof playPromise.then === "function") {
+    playPromise
+      .then(() => {
+        audioUnlockElement.pause();
+        try {
+          audioUnlockElement.currentTime = 0;
+        } catch {
+          // Ignore reset failures on iOS.
+        }
+      })
+      .catch(() => {});
+  }
 }
 
 function recoverAudioOnInteraction() {
