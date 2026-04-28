@@ -43,8 +43,8 @@ const PUCK_RESTITUTION = 0.85;
 const MALLET_RESTITUTION = 0.80;
 const MALLET_STRIKE_TRANSFER = 0.62;
 const MALLET_HIT_COOLDOWN_MS = 28;
-const CONTACT_SEPARATION = 0.75;
-const CONTACT_SLOP = 1.25;
+const CONTACT_SEPARATION = 0.35;
+const CONTACT_SLOP = 0.15;
 const STATIC_PUCK_SPEED = 70;
 const STATIC_STRIKE_MIN_SPEED = 520;
 const STATIC_SWEEP_MIN_SPEED = 460;
@@ -52,8 +52,8 @@ const EDGE_BLOCK_RESPONSE_SPEED = 48;
 const STRONG_STRIKE_MIN_SPEED = 180;
 const STRIKE_ESCAPE_TRANSFER = 0.42;
 const PUCK_SUBSTEPS = 18;
-const INPUT_SWEEP_STEP_PIXELS = 5;
-const MAX_INPUT_SWEEP_STEPS = 30;
+const INPUT_SWEEP_STEP_PIXELS = 2.5;
+const MAX_INPUT_SWEEP_STEPS = 72;
 const FRICTION_PER_SECOND = 0.991;
 const STUCK_SPEED = 95;
 const STUCK_SECONDS = 0.38;
@@ -1096,7 +1096,6 @@ function syncPuckHistory(puck) {
 
 function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   const minDistance = TABLE.puckRadius + TABLE.malletRadius;
-  const collisionDistance = minDistance + CONTACT_SLOP;
   const now = Date.now();
   const startX = Number.isFinite(mallet.sweepFromX) ? mallet.sweepFromX : mallet.x;
   const startY = Number.isFinite(mallet.sweepFromY) ? mallet.sweepFromY : mallet.y;
@@ -1127,14 +1126,6 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   let distance = Math.hypot(dx, dy);
   let sweptHit = false;
   const startedInContact = relativeStartDistance <= minDistance + 0.001;
-  const finalContact = getSatCircleContact(
-    mallet.x,
-    mallet.y,
-    TABLE.malletRadius,
-    puck.x,
-    puck.y,
-    TABLE.puckRadius
-  );
 
   if (relativeStartDistance > minDistance + 0.001) {
     const a = relativeDeltaX * relativeDeltaX + relativeDeltaY * relativeDeltaY;
@@ -1150,13 +1141,9 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
       if (discriminant >= 0) {
         const root = Math.sqrt(discriminant);
         const t0 = (-b - root) / (2 * a);
-        const t1 = (-b + root) / (2 * a);
         if (t0 >= 0 && t0 <= 1) {
           hit = true;
           hitT = t0;
-        } else if (t1 >= 0 && t1 <= 1 && relativeStartDistance <= collisionDistance) {
-          hit = true;
-          hitT = 0;
         }
       }
     }
