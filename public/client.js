@@ -53,6 +53,7 @@ const colors = {
 };
 
 const LANGUAGE_STORAGE_KEY = "air-hockey-online-language";
+const SOUND_ENABLED_STORAGE_KEY = "air-hockey-online-sound-enabled";
 const translations = {
   zh: {
     you: "你",
@@ -217,6 +218,7 @@ let audio = null;
 let audioMasterGain = null;
 let audioPrimed = false;
 let audioUnlockPromise = null;
+let audioUnlockedByGesture = false;
 let statusRaw = "chooseMode";
 let statusText = t("chooseMode");
 const playerKey = getPlayerKey();
@@ -226,7 +228,7 @@ let previousUiScreen = null;
 let uiTransitionStartedAt = performance.now();
 let pendingStartMode = "bot";
 let menuButtons = [];
-let soundEnabled = true;
+let soundEnabled = getInitialSoundEnabled();
 let localPointerMalletIndex = 0;
 let lastPhase = null;
 let phaseChangedAt = performance.now();
@@ -264,33 +266,55 @@ document.addEventListener("visibilitychange", () => {
     clearTimeout(reconnectTimer);
     connect();
   }
+  void recoverAudioContext();
 });
-window.addEventListener("pointerdown", unlockAudio, { capture: true, passive: true });
-window.addEventListener("touchstart", unlockAudio, { capture: true, passive: true });
-window.addEventListener("mousedown", unlockAudio, { capture: true, passive: true });
-window.addEventListener("keydown", unlockAudio, { capture: true });
-window.addEventListener("pageshow", unlockAudio, { passive: true });
+window.addEventListener("pointerdown", () => {
+  void unlockAudio(true);
+}, { capture: true, passive: true });
+window.addEventListener("touchstart", () => {
+  void unlockAudio(true);
+}, { capture: true, passive: true });
+window.addEventListener("touchend", () => {
+  void unlockAudio(true);
+}, { capture: true, passive: true });
+window.addEventListener("mousedown", () => {
+  void unlockAudio(true);
+}, { capture: true, passive: true });
+window.addEventListener("click", () => {
+  void unlockAudio(true);
+}, { capture: true, passive: true });
+window.addEventListener("keydown", () => {
+  void unlockAudio(true);
+}, { capture: true });
+window.addEventListener("pageshow", () => {
+  void recoverAudioContext();
+}, { passive: true });
+
+function enableSoundFromGesture() {
+  if (!soundEnabled) return Promise.resolve(false);
+  return unlockAudio(true);
+}
 
 els.onePuckButton.addEventListener("click", () => setPuckCount(1));
 els.twoPuckButton.addEventListener("click", () => setPuckCount(2));
 els.quickButton.addEventListener("click", () => {
-  unlockAudio();
+  void enableSoundFromGesture();
   send({ type: "quick", puckCount });
   setStatus("searching");
 });
 els.createButton.addEventListener("click", () => {
-  unlockAudio();
+  void enableSoundFromGesture();
   send({ type: "create", puckCount });
   setStatus("waitingOpponent");
 });
 els.botButton.addEventListener("click", () => {
-  unlockAudio();
+  void enableSoundFromGesture();
   send({ type: "create", puckCount, bot: true });
   setStatus("practice");
 });
 els.joinForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  unlockAudio();
+  void enableSoundFromGesture();
   const code = els.roomInput.value.trim().toUpperCase();
   if (code) send({ type: "join", code });
 });
@@ -591,6 +615,25 @@ function getInitialLanguage() {
     // Ignore storage failures in private browsing modes.
   }
   return navigator.language?.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+function getInitialSoundEnabled() {
+  try {
+    const saved = localStorage.getItem(SOUND_ENABLED_STORAGE_KEY);
+    if (saved === "false") return false;
+    if (saved === "true") return true;
+  } catch {
+    // Ignore storage failures and keep sound enabled by default.
+  }
+  return true;
+}
+
+function persistSoundEnabled() {
+  try {
+    localStorage.setItem(SOUND_ENABLED_STORAGE_KEY, String(soundEnabled));
+  } catch {
+    // Ignore storage failures for this session.
+  }
 }
 
 function t(key) {
@@ -1073,7 +1116,7 @@ function setUiNotice(text) {
 
 function startSelectedMode(count) {
   setPuckCount(count);
-  unlockAudio();
+  void enableSoundFromGesture();
   if (pendingStartMode === "bot") {
     clearRoomUrl();
     send({ type: "create", puckCount: count, bot: true });
@@ -1375,19 +1418,19 @@ function drawMainMenu(interactive) {
   const labels = [t("mainSingle"), t("mainLocal"), t("mainWireless"), t("mainOnline")];
   const actions = [
     () => {
-      unlockAudio();
+      void enableSoundFromGesture();
       clearRoomUrl();
       pendingStartMode = "bot";
       showUi("puck");
     },
     () => {
-      unlockAudio();
+      void enableSoundFromGesture();
       clearRoomUrl();
       pendingStartMode = "local";
       showUi("puck");
     },
     () => {
-      unlockAudio();
+      void enableSoundFromGesture();
       if (roomCode) {
         send({ type: "leaveToMenu" });
         clearRoom();
@@ -1397,7 +1440,7 @@ function drawMainMenu(interactive) {
       showUi("puck");
     },
     () => {
-      unlockAudio();
+      void enableSoundFromGesture();
       if (returnToActiveOnlineRoom()) return;
       pendingStartMode = "online";
       showUi("online");
@@ -1667,8 +1710,9 @@ function drawPauseOverlay() {
   addButton({ x: 124, y: 22, w: 342, h: 116 }, exitToMain);
   addButton({ x: 62, y: 686, w: 172, h: 150 }, () => {
     soundEnabled = !soundEnabled;
+    persistSoundEnabled();
     if (!soundEnabled && audio) audio.suspend();
-    if (soundEnabled) unlockAudio();
+    if (soundEnabled) void enableSoundFromGesture();
   });
 }
 
@@ -2477,10 +2521,21 @@ function primeAudioContext() {
   audioPrimed = true;
 }
 
-function unlockAudio() {
+function recoverAudioContext() {
+  if (!soundEnabled || !audio) return Promise.resolve(false);
+  if (audio.state === "running") return Promise.resolve(true);
+  return audio.resume().then(() => audio.state === "running").catch(() => false);
+}
+
+function unlockAudio(fromGesture = true) {
   if (!soundEnabled) return Promise.resolve(false);
-  const context = ensureAudioContext();
+  const context = audio || (fromGesture ? ensureAudioContext() : null);
   if (!context) return Promise.resolve(false);
+
+  if (fromGesture) {
+    audioUnlockedByGesture = true;
+    primeAudioContext();
+  }
 
   if (context.state === "running") {
     primeAudioContext();
@@ -2491,7 +2546,14 @@ function unlockAudio() {
     audioUnlockPromise = context
       .resume()
       .then(() => {
-        if (context.state === "running") primeAudioContext();
+        if (context.state === "running") {
+          if (audioUnlockedByGesture) primeAudioContext();
+          return true;
+        }
+        return false;
+      })
+      .then((ready) => {
+        if (ready && audioUnlockedByGesture) primeAudioContext();
         return context.state === "running";
       })
       .catch(() => false)
@@ -2505,7 +2567,7 @@ function unlockAudio() {
 
 function playFx(kind, intensity = 0.5) {
   if (!soundEnabled) return;
-  const unlock = unlockAudio();
+  const unlock = unlockAudio(false);
   if (!audio || audio.state !== "running") {
     void unlock.then((ready) => {
       if (ready && audio?.state === "running") playFx(kind, intensity);
