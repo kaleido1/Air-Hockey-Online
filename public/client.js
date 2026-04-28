@@ -3230,6 +3230,8 @@ function drawGameOverOverlay(state) {
 
   ctx.save();
   ctx.globalAlpha = alpha;
+  ctx.fillStyle = won ? "#15110a" : "#101621";
+  ctx.fillRect(0, 0, TABLE.width, TABLE.height);
   const glow = ctx.createRadialGradient(
     TABLE.width / 2,
     TABLE.height / 2,
@@ -3240,7 +3242,7 @@ function drawGameOverOverlay(state) {
   );
   glow.addColorStop(0, won ? "rgba(255,245,170,0.82)" : "rgba(185,210,255,0.72)");
   glow.addColorStop(0.42, won ? "rgba(255,190,50,0.32)" : "rgba(60,105,190,0.34)");
-  glow.addColorStop(1, "rgba(0,0,0,0.58)");
+  glow.addColorStop(1, "rgba(0,0,0,0)");
   ctx.fillStyle = glow;
   ctx.fillRect(0, 0, TABLE.width, TABLE.height);
 
@@ -3256,13 +3258,6 @@ function drawGameOverOverlay(state) {
   ctx.strokeText(won ? t("victory") : t("defeat"), 0, -20);
   ctx.fillStyle = won ? "#ffcf38" : "#3c6fc6";
   ctx.fillText(won ? t("victory") : t("defeat"), 0, -20);
-
-  ctx.font = "800 30px Arial, sans-serif";
-  ctx.lineWidth = 4;
-  ctx.strokeStyle = "rgba(0,0,0,0.45)";
-  ctx.strokeText(t("returnMain"), 0, 58);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillText(t("returnMain"), 0, 58);
   ctx.restore();
 }
 
