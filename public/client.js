@@ -2515,7 +2515,11 @@ function activateAudioFromGesture() {
   if (!soundEnabled) return Promise.resolve(false);
   const context = ensureAudioContext();
   if (!context) return Promise.resolve(false);
-  primeAudioActivation();
+  audioUnlockedByGesture = true;
+  if (context.state === "running") {
+    finishAudioActivation();
+    return Promise.resolve(true);
+  }
   return unlockAudio(true);
 }
 
@@ -2557,6 +2561,13 @@ function primeAudioActivation() {
   audioActivationPrimed = true;
 }
 
+function finishAudioActivation() {
+  if (!audio || audio.state !== "running") return false;
+  primeAudioActivation();
+  if (!audioPrimed) primeAudioContext();
+  return true;
+}
+
 function primeAudioContext() {
   if (!audio || !getAudioOutput() || audioPrimed) return;
   const now = audio.currentTime;
@@ -2577,11 +2588,17 @@ function primeAudioContext() {
 
 function recoverAudioContext() {
   if (!soundEnabled || !audio) return Promise.resolve(false);
-  if (audio.state === "running") return Promise.resolve(true);
+  if (audio.state === "running") return Promise.resolve(finishAudioActivation());
   if (audio.state === "interrupted") {
-    return audio.resume().then(() => audio.state === "running").catch(() => false);
+    return audio
+      .resume()
+      .then(() => finishAudioActivation())
+      .catch(() => false);
   }
-  return audio.resume().then(() => audio.state === "running").catch(() => false);
+  return audio
+    .resume()
+    .then(() => finishAudioActivation())
+    .catch(() => false);
 }
 
 function unlockAudio(fromGesture = true) {
@@ -2591,11 +2608,10 @@ function unlockAudio(fromGesture = true) {
 
   if (fromGesture) {
     audioUnlockedByGesture = true;
-    primeAudioActivation();
   }
 
   if (context.state === "running") {
-    primeAudioContext();
+    finishAudioActivation();
     return Promise.resolve(true);
   }
 
@@ -2603,15 +2619,8 @@ function unlockAudio(fromGesture = true) {
     audioUnlockPromise = context
       .resume()
       .then(() => {
-        if (context.state === "running") {
-          if (audioUnlockedByGesture) primeAudioContext();
-          return true;
-        }
-        return false;
-      })
-      .then((ready) => {
-        if (ready && audioUnlockedByGesture) primeAudioContext();
-        return context.state === "running";
+        if (!audioUnlockedByGesture) return context.state === "running";
+        return finishAudioActivation();
       })
       .catch(() => false)
       .finally(() => {
