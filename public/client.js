@@ -270,6 +270,7 @@ const predictedMallets = new Map();
 const LOCAL_PREDICTION_WINDOW_MS = 90;
 const LOCAL_PREDICTION_RELEASE_MS = 72;
 const LOCAL_REHIT_SUPPRESSION_MS = 10;
+const LOCAL_BLOCK_INPUT_GRACE_MS = 58;
 const LOCAL_CONTACT_SEPARATION = 0.12;
 const LOCAL_CONTACT_SLOP = 1.4;
 const LOCAL_BLOCK_RELEASE_SPEED = 180;
@@ -620,7 +621,7 @@ function handleRealtimeMessage(packet) {
 }
 
 function applyRealtimeState(message) {
-  applyPuckCorrection(message.state);
+  applyPuckCorrection(message.state, message.ackInputSeq || 0);
   previousState = serverState;
   serverState = message.state;
   lastStateReceivedAt = performance.now();
@@ -913,7 +914,7 @@ function clearRoom() {
   history.replaceState(null, "", location.pathname);
 }
 
-function applyPuckCorrection(nextState) {
+function applyPuckCorrection(nextState, ackInputSeq = 0) {
   if (!nextState?.pucks?.length || !serverState?.pucks?.length) {
     puckCorrections.clear();
     localPredictedPucks.clear();
@@ -939,7 +940,9 @@ function applyPuckCorrection(nextState) {
     const prediction = localPredictedPucks.get(puck.id);
     if (prediction) {
       const predictionDelta = Math.hypot(prediction.x - authoritative.x, prediction.y - authoritative.y);
-      if (predictionDelta < 3 || prediction.expiresAt <= now) {
+      const serverAcknowledgedPrediction =
+        prediction.inputSeq && isInputSeqAcknowledged(ackInputSeq, prediction.inputSeq);
+      if (predictionDelta < 3 || prediction.expiresAt <= now || (serverAcknowledgedPrediction && predictionDelta > 8)) {
         localPredictedPucks.delete(puck.id);
       }
     }
@@ -998,6 +1001,7 @@ function sendPointerFromPoint(point, force, targetIndex) {
   const previousInputAt = lastInputAtByPlayer[targetIndex] || now - 1000 / 120;
   if (!force && now - lastInputAtByPlayer[targetIndex] < inputIntervalMs) return;
   lastInputAtByPlayer[targetIndex] = now;
+  const inputSeq = nextInputSeq++;
   let constrained = constrainForPlayer(targetIndex, point.x, point.y);
   if (serverState?.phase !== "playing") {
     constrained = constrainMalletAwayFromPucks(targetIndex, constrained.x, constrained.y, serverState?.pucks || []);
@@ -1015,6 +1019,8 @@ function sendPointerFromPoint(point, force, targetIndex) {
     y: constrained.y,
     vx: (constrained.x - fromX) / predictedDt,
     vy: (constrained.y - fromY) / predictedDt,
+    inputSeq,
+    inputAt: now,
     expiresAt: performance.now() + 180
   });
   if (ENABLE_LOCAL_PUCK_PREDICTION) {
@@ -1025,12 +1031,13 @@ function sendPointerFromPoint(point, force, targetIndex) {
       constrained.x,
       constrained.y,
       previousInputAt,
-      now
+      now,
+      inputSeq
     );
   }
   sendRealtime(
     encodeInputPacket({
-      inputSeq: nextInputSeq++,
+      inputSeq,
       clientTick: Math.round(now),
       playerIndex: targetIndex,
       x: constrained.x,
@@ -1039,7 +1046,7 @@ function sendPointerFromPoint(point, force, targetIndex) {
   );
 }
 
-function applySegmentedLocalStrikePrediction(index, fromX, fromY, toX, toY, previousInputAt, now) {
+function applySegmentedLocalStrikePrediction(index, fromX, fromY, toX, toY, previousInputAt, now, inputSeq = 0) {
   const dx = toX - fromX;
   const dy = toY - fromY;
   const distance = Math.hypot(dx, dy);
@@ -1054,13 +1061,13 @@ function applySegmentedLocalStrikePrediction(index, fromX, fromY, toX, toY, prev
   for (let step = 1; step <= steps; step += 1) {
     const endX = lerp(fromX, toX, step / steps);
     const endY = lerp(fromY, toY, step / steps);
-    applyLocalStrikePrediction(index, startX, startY, endX, endY, now, malletSpeed);
+    applyLocalStrikePrediction(index, startX, startY, endX, endY, now, malletSpeed, inputSeq);
     startX = endX;
     startY = endY;
   }
 }
 
-function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSpeedOverride = null) {
+function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSpeedOverride = null, inputSeq = 0) {
   if (!serverState?.pucks?.length) return;
   const malletRadius = TABLE.malletRadius;
   const puckRadius = TABLE.puckRadius;
@@ -1137,6 +1144,7 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
       y: puck.y,
       vx: puck.vx,
       vy: puck.vy,
+      inputSeq,
       startedAt: now,
       expiresAt: now + LOCAL_PREDICTION_WINDOW_MS
     });
@@ -1593,7 +1601,7 @@ function maybePredictLocalBlockContact(puck, state) {
   const minDistance = TABLE.malletRadius + TABLE.puckRadius;
 
   for (const index of controlledMalletIndices()) {
-    const mallet = predictedMalletForPhysics(state?.mallets?.[index], index, now);
+    const mallet = predictedMalletForPhysics(state?.mallets?.[index], index, now, true);
     if (!mallet) continue;
 
     let dx = puck.x - mallet.x;
@@ -1633,6 +1641,7 @@ function maybePredictLocalBlockContact(puck, state) {
       y: mallet.y + ny * (minDistance + LOCAL_CONTACT_SEPARATION),
       vx,
       vy,
+      inputSeq: mallet.inputSeq || 0,
       startedAt: now,
       expiresAt: now + LOCAL_PREDICTION_WINDOW_MS
     });
@@ -1647,19 +1656,29 @@ function controlledMalletIndices() {
   return playerIndex === 0 || playerIndex === 1 ? [playerIndex] : [];
 }
 
-function predictedMalletForPhysics(mallet, index, now = performance.now()) {
+function predictedMalletForPhysics(mallet, index, now = performance.now(), requireFreshInput = false) {
   const predicted = predictedMallets.get(index);
   if (predicted && now <= predicted.expiresAt) {
+    if (requireFreshInput && now - (predicted.inputAt || 0) > LOCAL_BLOCK_INPUT_GRACE_MS) return null;
     return {
       ...(mallet || {}),
       x: predicted.x,
       y: predicted.y,
       vx: predicted.vx || 0,
-      vy: predicted.vy || 0
+      vy: predicted.vy || 0,
+      inputSeq: predicted.inputSeq || 0
     };
   }
   if (predicted) predictedMallets.delete(index);
+  if (requireFreshInput) return null;
   return mallet || null;
+}
+
+function isInputSeqAcknowledged(ackInputSeq, inputSeq) {
+  const ack = ackInputSeq & 0xffff;
+  const input = inputSeq & 0xffff;
+  if (ack === input) return true;
+  return ((ack - input + 0x10000) & 0xffff) < 0x8000;
 }
 
 function wrappedTickDelta(previousTick, nextTick) {
