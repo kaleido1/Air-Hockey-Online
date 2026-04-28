@@ -235,10 +235,11 @@ let statusRaw = "chooseMode";
 let statusText = t("chooseMode");
 const playerKey = getPlayerKey();
 
-let uiScreen = pendingRoomFromUrl ? "waiting" : isIOS ? "sound" : "main";
+let uiScreen = pendingRoomFromUrl ? "waiting" : "main";
 let previousUiScreen = null;
 let uiTransitionStartedAt = performance.now();
 let pendingStartMode = "bot";
+let pendingModeStartAction = null;
 let menuButtons = [];
 let soundEnabled = getInitialSoundEnabled();
 let audioSessionArmed = !isIOS;
@@ -1217,6 +1218,15 @@ function joinOnlineRoom() {
   showUi("waiting");
 }
 
+function runWithSoundGate(action) {
+  if (!isIOS || audioSessionArmed) {
+    action();
+    return;
+  }
+  pendingModeStartAction = action;
+  showUi("sound");
+}
+
 function isActivePlay() {
   return Boolean(
     !uiScreen &&
@@ -1481,28 +1491,36 @@ function drawMainMenu(interactive) {
   const labels = [t("mainSingle"), t("mainLocal"), t("mainWireless"), t("mainOnline")];
   const actions = [
     () => {
-      clearRoomUrl();
-      pendingStartMode = "bot";
-      showUi("puck");
+      runWithSoundGate(() => {
+        clearRoomUrl();
+        pendingStartMode = "bot";
+        showUi("puck");
+      });
     },
     () => {
-      clearRoomUrl();
-      pendingStartMode = "local";
-      showUi("puck");
+      runWithSoundGate(() => {
+        clearRoomUrl();
+        pendingStartMode = "local";
+        showUi("puck");
+      });
     },
     () => {
-      if (roomCode) {
-        send({ type: "leaveToMenu" });
-        clearRoom();
-      }
-      clearRoomUrl();
-      pendingStartMode = "lan";
-      showUi("puck");
+      runWithSoundGate(() => {
+        if (roomCode) {
+          send({ type: "leaveToMenu" });
+          clearRoom();
+        }
+        clearRoomUrl();
+        pendingStartMode = "lan";
+        showUi("puck");
+      });
     },
     () => {
-      if (returnToActiveOnlineRoom()) return;
-      pendingStartMode = "online";
-      showUi("online");
+      runWithSoundGate(() => {
+        if (returnToActiveOnlineRoom()) return;
+        pendingStartMode = "online";
+        showUi("online");
+      });
     },
   ];
 
@@ -1563,8 +1581,10 @@ function drawSoundGateMenu(interactive) {
 
   if (interactive) {
     addButton(start, () => {
+      const action = pendingModeStartAction;
+      pendingModeStartAction = null;
       void armAudioSessionFromModeButton();
-      showUi("main");
+      if (action) action();
     });
   }
 }
