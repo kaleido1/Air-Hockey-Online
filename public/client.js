@@ -56,7 +56,7 @@ const colors = {
 };
 
 const LANGUAGE_STORAGE_KEY = "air-hockey-online-language";
-const SOUND_ENABLED_STORAGE_KEY = "air-hockey-online-sound-enabled";
+const SOUND_ENABLED_STORAGE_KEY = "air-hockey-online-sound-enabled-v2";
 const translations = {
   zh: {
     you: "你",
