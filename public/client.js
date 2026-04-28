@@ -1026,6 +1026,8 @@ function startOfflineGame(mode, count = puckCount) {
     phaseEndsInMs: 700,
     scores: [0, 0],
     lastScorer: null,
+    roundScorers: [0, 0],
+    nextServeScorer: null,
     winner: null,
     mallets: [
       { x: bottomStart.x, y: bottomStart.y, vx: 0, vy: 0, physicsPrevX: bottomStart.x, physicsPrevY: bottomStart.y },
@@ -1161,6 +1163,8 @@ function resetOfflinePucks(scorer) {
   }
   offlineGame.bodies.clear();
   offlineGame.state.pucks = [];
+  offlineGame.state.roundScorers = [0, 0];
+  offlineGame.state.nextServeScorer = null;
   const server = scorer === 0 ? 1 : scorer === 1 ? 0 : Math.random() > 0.5 ? 0 : 1;
   const serveY = getServeAnchorY(server);
   for (let index = 0; index < offlineGame.puckCount; index += 1) {
@@ -1319,7 +1323,7 @@ function stepOfflineGame(frameTime) {
     phaseChangedAt = now;
     setStatus("");
   } else if (state.phase === "point" && now >= state.phaseEndsAt) {
-    resetOfflinePucks(state.lastScorer);
+    resetOfflinePucks(state.nextServeScorer);
     state.phase = "playing";
     state.phaseEndsAt = 0;
     phaseChangedAt = now;
@@ -1365,7 +1369,7 @@ function stepOfflineMatterWorld(dt) {
     capLocalPredictedPuckSpeed(puck);
     resolveOfflinePuckMalletContacts(puck, dt);
     const scorer = detectOfflineGoal(puck);
-    if (scorer !== null) scored.push(scorer);
+    if (scorer !== null) scored.push({ puck, scorer });
   }
   for (const mallet of offlineGame.state.mallets) {
     mallet.physicsPrevX = mallet.x;
@@ -1399,32 +1403,49 @@ function detectOfflineGoal(puck) {
   return detectGoalCrossing(TABLE, puck);
 }
 
-function awardOfflineScoredPucks(scorers) {
+function awardOfflineScoredPucks(scoredPucks) {
   if (!offlineGame || offlineGame.state.phase === "gameover") return;
   const state = offlineGame.state;
+  if (!Array.isArray(state.roundScorers)) state.roundScorers = [0, 0];
   let lastScorer = null;
-  for (const scorer of scorers) {
+  const scoredIds = new Set();
+  for (const { puck, scorer } of scoredPucks) {
+    scoredIds.add(puck.id);
     state.scores[scorer] = Math.min(TABLE.firstTo, state.scores[scorer] + 1);
+    state.roundScorers[scorer] = (state.roundScorers[scorer] || 0) + 1;
     lastScorer = scorer;
+    const body = offlineGame.bodies.get(puck.id);
+    if (body) window.Matter?.Composite?.remove(offlineGame.engine.world, body);
+    offlineGame.bodies.delete(puck.id);
   }
   state.lastScorer = lastScorer;
   playFx("score", 1);
-  for (const body of offlineGame.bodies.values()) {
-    window.Matter?.Composite?.remove(offlineGame.engine.world, body);
-  }
-  offlineGame.bodies.clear();
-  state.pucks = [];
+  state.pucks = state.pucks.filter((puck) => !scoredIds.has(puck.id));
   if (state.scores[lastScorer] >= TABLE.firstTo) {
+    for (const body of offlineGame.bodies.values()) {
+      window.Matter?.Composite?.remove(offlineGame.engine.world, body);
+    }
+    offlineGame.bodies.clear();
+    state.pucks = [];
     state.phase = "gameover";
     state.winner = lastScorer;
     phaseChangedAt = performance.now();
     scheduleGameoverReturn();
     return;
   }
+  if (state.pucks.length > 0) return;
+  state.nextServeScorer = nextOfflineServeScorerFromRound(state.roundScorers);
   state.phase = "point";
   state.phaseEndsAt = performance.now() + 900;
   phaseChangedAt = performance.now();
   setStatus("goal");
+}
+
+function nextOfflineServeScorerFromRound(roundScorers) {
+  const bottomScored = roundScorers?.[0] || 0;
+  const topScored = roundScorers?.[1] || 0;
+  if (bottomScored === topScored) return null;
+  return bottomScored > topScored ? 0 : 1;
 }
 
 function updateOfflineBot(dt, now) {

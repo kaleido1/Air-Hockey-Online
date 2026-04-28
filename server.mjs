@@ -880,7 +880,7 @@ function tickRooms() {
     }
 
     if (room.state.phase === "point" && now >= room.state.phaseEndsAt) {
-      resetPucks(room, room.state.lastScorer);
+      resetPucks(room, room.state.nextServeScorer);
       room.state.phase = "playing";
       room.state.phaseEndsAt = 0;
     }
@@ -1503,9 +1503,11 @@ function awardScoredPucks(room, scorers) {
   const state = room.state;
   if (state.phase === "gameover") return;
 
+  if (!Array.isArray(state.roundScorers)) state.roundScorers = [0, 0];
   let lastScorer = null;
   for (const scorer of scorers) {
     state.scores[scorer] = Math.min(TABLE.firstTo, state.scores[scorer] + 1);
+    state.roundScorers[scorer] = (state.roundScorers[scorer] || 0) + 1;
     state.lastScorer = scorer;
     lastScorer = scorer;
 
@@ -1518,6 +1520,7 @@ function awardScoredPucks(room, scorers) {
   }
 
   if (state.phase !== "gameover" && state.pucks.length === 0) {
+    state.nextServeScorer = nextServeScorerFromRound(state.roundScorers);
     state.phase = "point";
     state.phaseEndsAt = Date.now() + 1100;
   }
@@ -1529,6 +1532,13 @@ function awardScoredPucks(room, scorers) {
     scores: state.scores,
     phase: state.phase
   });
+}
+
+function nextServeScorerFromRound(roundScorers) {
+  const bottomScored = roundScorers?.[0] || 0;
+  const topScored = roundScorers?.[1] || 0;
+  if (bottomScored === topScored) return null;
+  return bottomScored > topScored ? 0 : 1;
 }
 
 function updateBot(room) {
@@ -1713,6 +1723,8 @@ function resetPucks(room, scorer) {
   const server =
     scorer === 0 ? 1 : scorer === 1 ? 0 : Math.random() > 0.5 ? 0 : 1;
   const serveY = getServeAnchorY(server);
+  room.state.roundScorers = [0, 0];
+  room.state.nextServeScorer = null;
   room.state.pucks = [];
   for (let index = 0; index < count; index += 1) {
     const offset = count === 1 ? 0 : index === 0 ? -58 : 58;
@@ -1800,6 +1812,8 @@ function initialState(puckCount = 1) {
     phaseEndsAt: 0,
     scores: [0, 0],
     lastScorer: null,
+    roundScorers: [0, 0],
+    nextServeScorer: null,
     winner: null,
     mallets: [
       {
