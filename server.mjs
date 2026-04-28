@@ -17,6 +17,13 @@ const HOST = process.env.HOST || process.env.HOSTNAME || "127.0.0.1";
 const PORT = Number(process.env.PORT || 3100);
 const PROTOCOL_VERSION = 2;
 const ENABLE_SERVER_LISTEN = process.env.AIR_HOCKEY_NO_LISTEN !== "1";
+const WEBRTC_SIGNALING_ENABLED = process.env.AIR_HOCKEY_WEBRTC_SIGNALING !== "0";
+const DEFAULT_ICE_SERVERS = [
+  {
+    urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]
+  }
+];
+const WEBRTC_ICE_SERVERS = parseIceServers(process.env.AIR_HOCKEY_WEBRTC_ICE_SERVERS);
 
 const TABLE = {
   width: 590,
@@ -88,9 +95,20 @@ const server = http.createServer((req, res) => {
     res.end(
       [
         `window.AIR_HOCKEY_SERVER_URL = ${JSON.stringify(String(process.env.AIR_HOCKEY_SERVER_URL || "").trim())};`,
-        "window.AIR_HOCKEY_REALTIME_MODE = 'binary-websocket';"
+        `window.AIR_HOCKEY_WEBRTC_ENABLED = ${JSON.stringify(WEBRTC_SIGNALING_ENABLED)};`,
+        `window.AIR_HOCKEY_WEBRTC_ICE_SERVERS = ${JSON.stringify(WEBRTC_ICE_SERVERS)};`,
+        "window.AIR_HOCKEY_REALTIME_MODE = 'webrtc-p2p-preferred-binary-websocket-fallback';"
       ].join("\n")
     );
+    return;
+  }
+
+  if (pathname === "/healthz") {
+    res.writeHead(200, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store"
+    });
+    res.end(JSON.stringify({ ok: true, mode: "render-signaling-webrtc-fallback" }));
     return;
   }
 
@@ -321,9 +339,33 @@ function handleMessage(client, message) {
     case "display":
       updateClientDisplay(client, message);
       break;
+    case "webrtcSignal":
+      relayWebRtcSignal(client, message);
+      break;
     default:
       send(client, { type: "error", message: "Unknown message" });
   }
+}
+
+function relayWebRtcSignal(client, message) {
+  if (!WEBRTC_SIGNALING_ENABLED) return;
+  const room = currentRoom(client);
+  if (!room || client.playerIndex === null || room.settings.local || room.players[client.playerIndex]?.bot) return;
+
+  const toIndex = client.playerIndex === 0 ? 1 : 0;
+  const target = room.players[toIndex];
+  if (!target || target.bot) return;
+
+  const targetClient = clients.get(target.id);
+  if (!targetClient) return;
+
+  const signal = sanitizeWebRtcSignal(message.signal);
+  if (!signal) return;
+  send(targetClient, {
+    type: "webrtcSignal",
+    from: client.playerIndex,
+    signal
+  });
 }
 
 function updateClientDisplay(client, message) {
@@ -2093,6 +2135,59 @@ export function runHighSpeedStaticStrikeSelfTest() {
     vy: puck.vy,
     passed: Boolean(hit) && distance >= minDistance && Math.hypot(puck.vx, puck.vy) >= PUCK_MIN_LIVE_SPEED
   };
+}
+
+function parseIceServers(raw) {
+  if (!raw) return DEFAULT_ICE_SERVERS;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return DEFAULT_ICE_SERVERS;
+    const servers = parsed
+      .map((server) => {
+        if (!server || typeof server !== "object") return null;
+        const urls = Array.isArray(server.urls)
+          ? server.urls.filter((url) => typeof url === "string" && url.trim())
+          : typeof server.urls === "string" && server.urls.trim()
+            ? server.urls
+            : null;
+        if (!urls || (Array.isArray(urls) && urls.length === 0)) return null;
+        return {
+          urls,
+          username: typeof server.username === "string" ? server.username : undefined,
+          credential: typeof server.credential === "string" ? server.credential : undefined
+        };
+      })
+      .filter(Boolean);
+    return servers.length ? servers : DEFAULT_ICE_SERVERS;
+  } catch {
+    return DEFAULT_ICE_SERVERS;
+  }
+}
+
+function sanitizeWebRtcSignal(signal) {
+  if (!signal || typeof signal !== "object") return null;
+
+  if (signal.description && typeof signal.description === "object") {
+    const { type, sdp } = signal.description;
+    if ((type === "offer" || type === "answer" || type === "rollback") && typeof sdp === "string") {
+      return { description: { type, sdp } };
+    }
+  }
+
+  if (signal.candidate && typeof signal.candidate === "object") {
+    const { candidate, sdpMid, sdpMLineIndex, usernameFragment } = signal.candidate;
+    if (typeof candidate !== "string") return null;
+    return {
+      candidate: {
+        candidate,
+        sdpMid: typeof sdpMid === "string" ? sdpMid : null,
+        sdpMLineIndex: Number.isInteger(sdpMLineIndex) ? sdpMLineIndex : null,
+        usernameFragment: typeof usernameFragment === "string" ? usernameFragment : undefined
+      }
+    };
+  }
+
+  return null;
 }
 
 function constrainMallet(index, x, y) {

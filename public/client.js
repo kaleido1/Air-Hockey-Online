@@ -279,6 +279,17 @@ let lastAckInputSeq = 0;
 let lastLocalHitFxAt = 0;
 let lastServerTickExtended = null;
 let interpolationDelayMs = 16;
+const WEBRTC_ENABLED = window.AIR_HOCKEY_WEBRTC_ENABLED !== false && "RTCPeerConnection" in window;
+const WEBRTC_ICE_SERVERS =
+  Array.isArray(window.AIR_HOCKEY_WEBRTC_ICE_SERVERS) && window.AIR_HOCKEY_WEBRTC_ICE_SERVERS.length
+    ? window.AIR_HOCKEY_WEBRTC_ICE_SERVERS
+    : [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
+const WEBRTC_CHANNEL_OPTIONS = { ordered: false, maxRetransmits: 0 };
+let rtcPeer = null;
+let rtcChannel = null;
+let rtcPeerKey = "";
+let rtcNegotiating = false;
+let rtcConnected = false;
 
 applyLanguage();
 startRefreshRateSampling();
@@ -516,6 +527,7 @@ function connect() {
 
   socket.addEventListener("close", () => {
     connected = false;
+    closeWebRtc();
     clearTimeout(heartbeatTimer);
     els.connectionStatus.textContent = t("offline");
     setStatus("reconnecting");
@@ -558,16 +570,19 @@ function handleMessage(message) {
       showUi("waiting");
       setButtons();
       updateRoomLabels();
+      maybeStartWebRtc();
       break;
     case "room":
       roomPlayers = message.players || roomPlayers;
       updateRoomLabels(message);
       if (message.players?.[1]?.bot) setStatus("practice");
+      maybeStartWebRtc();
       break;
     case "started":
       roomMinimized = false;
       showUi(null);
       setStatus("getReady");
+      maybeStartWebRtc();
       break;
     case "score":
       playFx("score", 1);
@@ -594,6 +609,9 @@ function handleMessage(message) {
         measuredRttMs = measuredRttMs * 0.8 + rtt * 0.2;
         els.pingStatus.textContent = `${rtt} ms`;
       }
+      break;
+    case "webrtcSignal":
+      void handleWebRtcSignal(message);
       break;
     default:
       break;
@@ -890,6 +908,7 @@ function clearRoom() {
   lastStateReceivedAt = 0;
   stateSnapshots.length = 0;
   roomPlayers = null;
+  closeWebRtc();
   predictedMallets.clear();
   puckCorrections.clear();
   localPredictedPucks.clear();
@@ -1021,15 +1040,15 @@ function sendPointerFromPoint(point, force, targetIndex) {
       now
     );
   }
-  sendRealtime(
-    encodeInputPacket({
-      inputSeq: nextInputSeq++,
-      clientTick: Math.round(now),
-      playerIndex: targetIndex,
-      x: constrained.x,
-      y: constrained.y
-    })
-  );
+  const packet = encodeInputPacket({
+    inputSeq: nextInputSeq++,
+    clientTick: Math.round(now),
+    playerIndex: targetIndex,
+    x: constrained.x,
+    y: constrained.y
+  });
+  sendRealtime(packet);
+  sendPeerRealtime(packet);
 }
 
 function applySegmentedLocalStrikePrediction(index, fromX, fromY, toX, toY, previousInputAt, now) {
@@ -1225,6 +1244,177 @@ function send(message) {
 function sendRealtime(payload) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
   socket.send(payload);
+}
+
+function sendPeerRealtime(payload) {
+  if (!isPeerRealtimeReady()) return;
+  const bytes = payload instanceof Uint8Array ? payload : new Uint8Array(payload);
+  rtcChannel.send(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+}
+
+function maybeStartWebRtc() {
+  if (!shouldUseWebRtc()) {
+    closeWebRtc();
+    return;
+  }
+
+  const nextKey = `${roomCode}:${playerIndex}:${roomPlayers?.map((player) => (player?.connected ? "1" : "0")).join("")}`;
+  if (rtcPeer && rtcPeerKey === nextKey) return;
+  closeWebRtc();
+  rtcPeerKey = nextKey;
+  const peer = createWebRtcPeer();
+
+  if (playerIndex === 0) {
+    bindWebRtcChannel(peer.createDataChannel("realtime", WEBRTC_CHANNEL_OPTIONS));
+    void sendWebRtcOffer(peer);
+  }
+}
+
+function shouldUseWebRtc() {
+  if (!WEBRTC_ENABLED || !connected || !roomCode || playerIndex === null || !roomSettings || !roomPlayers) return false;
+  if (roomSettings.local || roomSettings.bot) return false;
+  const humans = roomPlayers.filter((player) => player && !player.bot && player.connected);
+  return humans.length >= 2;
+}
+
+function createWebRtcPeer() {
+  const peer = new RTCPeerConnection({ iceServers: WEBRTC_ICE_SERVERS });
+  rtcPeer = peer;
+
+  peer.addEventListener("icecandidate", (event) => {
+    if (!event.candidate) return;
+    send({ type: "webrtcSignal", signal: { candidate: event.candidate.toJSON() } });
+  });
+
+  peer.addEventListener("datachannel", (event) => {
+    bindWebRtcChannel(event.channel);
+  });
+
+  peer.addEventListener("connectionstatechange", () => {
+    rtcConnected = peer.connectionState === "connected";
+    if (rtcConnected) {
+      els.connectionStatus.textContent = "P2P";
+    } else if (connected && els.connectionStatus.textContent === "P2P") {
+      els.connectionStatus.textContent = t("online");
+    }
+    if (peer.connectionState === "failed" || peer.connectionState === "closed") {
+      rtcConnected = false;
+    }
+  });
+
+  return peer;
+}
+
+async function sendWebRtcOffer(peer) {
+  if (rtcNegotiating || !peer || peer.signalingState !== "stable") return;
+  rtcNegotiating = true;
+  try {
+    const offer = await peer.createOffer();
+    if (peer.signalingState !== "stable") return;
+    await peer.setLocalDescription(offer);
+    send({ type: "webrtcSignal", signal: { description: peer.localDescription } });
+  } catch {
+    closeWebRtc();
+  } finally {
+    rtcNegotiating = false;
+  }
+}
+
+async function handleWebRtcSignal(message) {
+  if (!WEBRTC_ENABLED || !roomCode || playerIndex === null) return;
+  const signal = message.signal || {};
+  const peer = rtcPeer || createWebRtcPeer();
+
+  try {
+    if (signal.description) {
+      const description = signal.description;
+      await peer.setRemoteDescription(description);
+      if (description.type === "offer") {
+        const answer = await peer.createAnswer();
+        await peer.setLocalDescription(answer);
+        send({ type: "webrtcSignal", signal: { description: peer.localDescription } });
+      }
+    } else if (signal.candidate) {
+      await peer.addIceCandidate(signal.candidate);
+    }
+  } catch {
+    closeWebRtc();
+  }
+}
+
+function bindWebRtcChannel(channel) {
+  if (!channel) return;
+  rtcChannel = channel;
+  rtcChannel.binaryType = "arraybuffer";
+  rtcChannel.addEventListener("open", () => {
+    rtcConnected = true;
+    els.connectionStatus.textContent = "P2P";
+  });
+  rtcChannel.addEventListener("close", () => {
+    rtcConnected = false;
+    if (connected) els.connectionStatus.textContent = t("online");
+  });
+  rtcChannel.addEventListener("message", (event) => {
+    handlePeerRealtimeMessage(event.data);
+  });
+}
+
+function handlePeerRealtimeMessage(payload) {
+  const message = decodeRealtimePacket(payload, Date.now());
+  if (!message || message.type !== "input") return;
+  applyPeerInputPrediction(message);
+}
+
+function applyPeerInputPrediction(message) {
+  if (!serverState?.mallets?.[message.playerIndex] || !serverState?.pucks?.length) return;
+  if (message.playerIndex === playerIndex) return;
+
+  const now = performance.now();
+  const targetIndex = message.playerIndex;
+  const constrained = constrainForPlayer(targetIndex, message.x, message.y);
+  const previousPredicted = predictedMallets.get(targetIndex);
+  const fromX = previousPredicted?.x ?? serverState.mallets[targetIndex].x ?? constrained.x;
+  const fromY = previousPredicted?.y ?? serverState.mallets[targetIndex].y ?? constrained.y;
+  const previousInputAt = lastInputAtByPlayer[targetIndex] || now - 1000 / 120;
+  lastInputAtByPlayer[targetIndex] = now;
+
+  serverState.mallets[targetIndex].x = constrained.x;
+  serverState.mallets[targetIndex].y = constrained.y;
+  predictedMallets.set(targetIndex, {
+    x: constrained.x,
+    y: constrained.y,
+    expiresAt: now + 180
+  });
+
+  if (ENABLE_LOCAL_PUCK_PREDICTION) {
+    applySegmentedLocalStrikePrediction(targetIndex, fromX, fromY, constrained.x, constrained.y, previousInputAt, now);
+  }
+}
+
+function isPeerRealtimeReady() {
+  return shouldUseWebRtc() && rtcChannel?.readyState === "open";
+}
+
+function closeWebRtc() {
+  rtcPeerKey = "";
+  rtcConnected = false;
+  rtcNegotiating = false;
+  if (rtcChannel) {
+    try {
+      rtcChannel.close();
+    } catch {
+      // The browser may already have closed the channel.
+    }
+  }
+  if (rtcPeer) {
+    try {
+      rtcPeer.close();
+    } catch {
+      // The browser may already have closed the peer connection.
+    }
+  }
+  rtcChannel = null;
+  rtcPeer = null;
 }
 
 function getPlayerKey() {

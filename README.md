@@ -48,9 +48,12 @@ Online mode supports remote play through room creation and room join flows. Play
 ## Technology
 
 - Node.js HTTP server with a lightweight WebSocket implementation.
+- Free-first WebRTC DataChannel peer input path with WebSocket fallback.
 - Canvas rendering for the rink, puck, mallets, overlays, and menus.
 - Server-authoritative physics and multiplayer synchronization.
 - Bilingual interface and browser-based multiplayer session management.
+
+See [Free WebRTC + Render Deployment](./docs/free-webrtc-render.md) for the free deployment configuration.
 
 ## License
 

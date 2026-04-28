@@ -48,9 +48,12 @@ https://air-hockey-online-kaleido1.onrender.com/
 ## 技术实现
 
 - 基于 Node.js 的 HTTP 服务与轻量级 WebSocket 实现。
+- 完全免费优先的 WebRTC DataChannel 同端输入通道，并保留 WebSocket 兜底。
 - 使用 Canvas 渲染球桌、冰球、球拍、界面和覆盖层。
 - 使用服务端权威物理与多人同步逻辑保证联机一致性。
 - 支持中英文界面与浏览器端多人房间流程管理。
+
+免费部署配置见 [Free WebRTC + Render Deployment](./docs/free-webrtc-render.md)。
 
 ## License
 
