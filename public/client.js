@@ -274,22 +274,22 @@ document.addEventListener("visibilitychange", () => {
   void recoverAudioContext();
 });
 window.addEventListener("pointerdown", () => {
-  void unlockAudio(true);
+  void activateAudioFromGesture();
 }, { capture: true, passive: true });
 window.addEventListener("touchstart", () => {
-  void unlockAudio(true);
+  void activateAudioFromGesture();
 }, { capture: true, passive: true });
 window.addEventListener("touchend", () => {
-  void unlockAudio(true);
+  void activateAudioFromGesture();
 }, { capture: true, passive: true });
 window.addEventListener("mousedown", () => {
-  void unlockAudio(true);
+  void activateAudioFromGesture();
 }, { capture: true, passive: true });
 window.addEventListener("click", () => {
-  void unlockAudio(true);
+  void activateAudioFromGesture();
 }, { capture: true, passive: true });
 window.addEventListener("keydown", () => {
-  void unlockAudio(true);
+  void activateAudioFromGesture();
 }, { capture: true });
 window.addEventListener("pageshow", () => {
   void recoverAudioContext();
@@ -297,7 +297,7 @@ window.addEventListener("pageshow", () => {
 
 function enableSoundFromGesture() {
   if (!soundEnabled) return Promise.resolve(false);
-  const audioReady = unlockAudio(true);
+  const audioReady = activateAudioFromGesture();
   if (isIOS) ensureIOSAudioUnlocked();
   return audioReady;
 }
@@ -344,11 +344,11 @@ els.leaveButton.addEventListener("click", () => {
 
 canvas.addEventListener("pointerdown", (event) => {
   pointerDown = true;
+  void activateAudioFromGesture();
   if (!(isLocalGame() && event.pointerType !== "touch")) {
     canvas.setPointerCapture(event.pointerId);
   }
   measureCanvas();
-  unlockAudio();
   const point = eventToCanvas(event);
   if (point && handleCanvasUi(point, event.detail || 1)) {
     pointerDown = false;
@@ -2506,6 +2506,11 @@ function ensureAudioContext() {
   return audio;
 }
 
+function activateAudioFromGesture() {
+  if (!soundEnabled) return Promise.resolve(false);
+  return unlockAudio(true);
+}
+
 function ensureIOSAudioElement() {
   if (!isIOS) return null;
   if (iosAudio) return iosAudio;
@@ -2575,7 +2580,7 @@ function unlockAudio(fromGesture = true) {
 
   if (fromGesture) {
     audioUnlockedByGesture = true;
-    primeAudioContext();
+    if (isIOS) ensureIOSAudioUnlocked();
   }
 
   if (context.state === "running") {
