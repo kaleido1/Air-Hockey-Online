@@ -299,7 +299,7 @@ const OFFLINE_DT = 1 / OFFLINE_PHYSICS_HZ;
 const OFFLINE_MAX_FRAME_MS = 60;
 const OFFLINE_BOT_MIN_SPEED = 2100;
 const OFFLINE_BOT_MAX_SPEED = 4550;
-const ENABLE_LOCAL_PUCK_PREDICTION = true;
+const ENABLE_ONLINE_PUCK_PREDICTION = false;
 const puckCorrections = new Map();
 const localPredictedPucks = new Map();
 const recentPuckPredictionAt = new Map();
@@ -1622,6 +1622,13 @@ function clearRoom() {
 }
 
 function applyPuckCorrection(nextState, ackInputSeq = 0) {
+  if (!ENABLE_ONLINE_PUCK_PREDICTION) {
+    puckCorrections.clear();
+    localPredictedPucks.clear();
+    recentPuckPredictionAt.clear();
+    return;
+  }
+
   if (nextState?.phase !== "playing" || !nextState?.pucks?.length || !serverState?.pucks?.length) {
     puckCorrections.clear();
     localPredictedPucks.clear();
@@ -1886,7 +1893,7 @@ function sendPointerFromPoint(point, force, targetIndex) {
     inputAt: now,
     expiresAt: performance.now() + 180
   });
-  if (ENABLE_LOCAL_PUCK_PREDICTION) {
+  if (ENABLE_ONLINE_PUCK_PREDICTION) {
     applySegmentedLocalStrikePrediction(
       targetIndex,
       fromX,
@@ -2405,7 +2412,7 @@ function rememberStateSnapshot(message) {
     const latest = stateSnapshots[stateSnapshots.length - 1];
     const spacingMs = latest.serverTime - previous.serverTime;
     const arrivalJitter = Math.abs((latest.receivedAt - previous.receivedAt) - spacingMs);
-    const targetDelay = clamp(spacingMs * 0.95 + arrivalJitter * 0.5 + measuredRttMs * 0.04, 10, 28);
+    const targetDelay = clamp(spacingMs * 0.8 + arrivalJitter * 0.35 + measuredRttMs * 0.025, 6, 20);
     interpolationDelayMs = lerp(interpolationDelayMs, targetDelay, 0.45);
   }
 }
@@ -2446,7 +2453,7 @@ function renderState() {
 
   const spanMs = Math.max(1, next.serverTime - previous.serverTime);
   const alpha = clamp((targetTime - previous.serverTime) / spanMs, 0, 1);
-  return applyOnlinePhysicsPrediction(interpolateState(previous.state, next.state, alpha));
+  return interpolateState(previous.state, next.state, alpha);
 }
 
 function interpolateState(fromState, toState, alpha) {
@@ -2515,7 +2522,7 @@ function applyOnlinePhysicsPrediction(state) {
 }
 
 function resolveOnlineVisiblePuckContact(puck, state, now) {
-  if (!ENABLE_LOCAL_PUCK_PREDICTION || localPredictedPucks.has(puck.id)) return null;
+  if (!ENABLE_ONLINE_PUCK_PREDICTION || localPredictedPucks.has(puck.id)) return null;
   if (wasPuckPredictedRecently(puck.id, now)) return null;
   for (const index of controlledMalletIndices()) {
     const mallet = predictedMalletForPhysics(state.mallets[index], index, now, isControlledMalletIndex(index));
@@ -2566,7 +2573,7 @@ function malletWithPreviousFrame(mallet, index) {
 }
 
 function displayPuck(puck, state) {
-  maybePredictLocalBlockContact(puck, state);
+  if (ENABLE_ONLINE_PUCK_PREDICTION) maybePredictLocalBlockContact(puck, state);
   const prediction = localPredictedPucks.get(puck.id);
   const now = performance.now();
   if (prediction) {
@@ -2602,7 +2609,7 @@ function displayPuck(puck, state) {
 }
 
 function maybePredictLocalBlockContact(puck, state) {
-  if (!ENABLE_LOCAL_PUCK_PREDICTION || serverState?.phase !== "playing") return;
+  if (!ENABLE_ONLINE_PUCK_PREDICTION || serverState?.phase !== "playing") return;
   if (!puck || localPredictedPucks.has(puck.id)) return;
   const now = performance.now();
   if (wasPuckPredictedRecently(puck.id, now)) return;
