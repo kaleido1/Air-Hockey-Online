@@ -6,7 +6,7 @@ Air Hockey Online is a browser-based arcade air hockey game built for fast, comp
 
 Play now:
 
-https://air-hockey-online-kaleido1.onrender.com/
+[https://air-hockey-online-kaleido1.onrender.com/](https://air-hockey-online-kaleido1.onrender.com/)
 
 ## How to Play
 

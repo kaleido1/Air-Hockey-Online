@@ -12,7 +12,6 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
-const satScriptPath = path.join(__dirname, "node_modules", "sat", "SAT.js");
 
 const HOST = process.env.HOST || process.env.HOSTNAME || "127.0.0.1";
 const PORT = Number(process.env.PORT || 3100);
@@ -80,22 +79,6 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || HOST}`);
   let pathname = decodeURIComponent(url.pathname);
   if (pathname === "/") pathname = "/index.html";
-
-  if (pathname === "/vendor/sat.js") {
-    fs.readFile(satScriptPath, (err, data) => {
-      if (err) {
-        res.writeHead(404);
-        res.end("Not found");
-        return;
-      }
-      res.writeHead(200, {
-        "Content-Type": "text/javascript; charset=utf-8",
-        "Cache-Control": "public, max-age=31536000, immutable"
-      });
-      res.end(data);
-    });
-    return;
-  }
 
   if (pathname === "/runtime-config.js") {
     res.writeHead(200, {
@@ -1143,6 +1126,7 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   let dy = probeY - contactY;
   let distance = Math.hypot(dx, dy);
   let sweptHit = false;
+  const startedInContact = relativeStartDistance <= minDistance + 0.001;
   const finalContact = getSatCircleContact(
     mallet.x,
     mallet.y,
@@ -1187,7 +1171,7 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
       dy = probeY - contactY;
       distance = Math.hypot(dx, dy);
     }
-  } else if (relativeStartDistance <= minDistance && (finalContact || distance < collisionDistance)) {
+  } else if (startedInContact) {
     sweptHit = true;
     hitT = 0;
     probeX = puckStartX;
@@ -1199,13 +1183,7 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
     distance = Math.hypot(dx, dy);
   }
 
-  if (!sweptHit && !finalContact && distance >= collisionDistance) return false;
-
-  if (!sweptHit && finalContact) {
-    dx = finalContact.nx;
-    dy = finalContact.ny;
-    distance = 1;
-  }
+  if (!sweptHit) return false;
 
   if (distance <= 0.001) {
     if (sweptHit) {

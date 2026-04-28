@@ -1043,8 +1043,6 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
   const malletRadius = TABLE.malletRadius;
   const puckRadius = TABLE.puckRadius;
   const minDistance = malletRadius + puckRadius;
-  const contactSkin = 1.25;
-  const collisionDistance = minDistance + contactSkin;
   const sweepX = toX - fromX;
   const sweepY = toY - fromY;
   const malletSpeed = malletSpeedOverride ?? Math.hypot(sweepX, sweepY) * 120;
@@ -1053,15 +1051,6 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
   for (const puck of serverState.pucks) {
     if (puck.localPredictedAt && now - puck.localPredictedAt < 22) continue;
     const visualPuck = puck;
-    const finalDistance = Math.hypot(visualPuck.x - toX, visualPuck.y - toY);
-    const finalContact = getSatCircleContact(
-      toX,
-      toY,
-      malletRadius,
-      visualPuck.x,
-      visualPuck.y,
-      puckRadius
-    );
     const relativeStartX = visualPuck.x - fromX;
     const relativeStartY = visualPuck.y - fromY;
     const relativeStartDistance = Math.hypot(relativeStartX, relativeStartY);
@@ -1074,10 +1063,8 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
       minDistance * minDistance;
     let hitT = null;
 
-    if (relativeStartDistance <= minDistance && finalDistance <= collisionDistance && malletSpeed > 180) {
+    if (relativeStartDistance <= minDistance + 0.001 && malletSpeed > 180) {
       hitT = 0;
-    } else if (finalContact && finalDistance <= collisionDistance && malletSpeed > 120) {
-      hitT = 1;
     } else if (movingTowardPuck && a > 0.000001) {
       const discriminant = b * b - 4 * a * c;
       if (discriminant >= 0) {
@@ -1092,8 +1079,8 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
     const contactMalletX = fromX + sweepX * hitT;
     const contactMalletY = fromY + sweepY * hitT;
 
-    let normalX = hitT === 1 && finalContact ? finalContact.nx : visualPuck.x - contactMalletX;
-    let normalY = hitT === 1 && finalContact ? finalContact.ny : visualPuck.y - contactMalletY;
+    let normalX = visualPuck.x - contactMalletX;
+    let normalY = visualPuck.y - contactMalletY;
     let normalLength = Math.hypot(normalX, normalY);
     if (normalLength <= 0.001) {
       normalX = sweepX || 1;
@@ -1107,7 +1094,7 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
     const moveY = sweepY / moveLength;
 
     const puckSpeed = Math.hypot(visualPuck.vx || 0, visualPuck.vy || 0);
-    const staticKick = puckSpeed < 70 && finalDistance <= collisionDistance ? 520 : 0;
+    const staticKick = puckSpeed < 70 ? 520 : 0;
     const sweepKick = staticKick > 0 && malletSpeed > 260 ? 460 : 0;
     let exitX = normalX;
     let exitY = normalY;
@@ -1136,21 +1123,6 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
     lastLocalHitFxAt = performance.now();
     playFx("hit", Math.min(1, strike / 900));
   }
-}
-
-function getSatCircleContact(ax, ay, ar, bx, by, br) {
-  const SATLib = globalThis.SAT;
-  if (!SATLib) return null;
-  const a = new SATLib.Circle(new SATLib.Vector(ax, ay), ar);
-  const b = new SATLib.Circle(new SATLib.Vector(bx, by), br);
-  const response = new SATLib.Response();
-  if (!SATLib.testCircleCircle(a, b, response)) return null;
-  const length = Math.hypot(response.overlapN.x, response.overlapN.y) || 1;
-  return {
-    nx: response.overlapN.x / length,
-    ny: response.overlapN.y / length,
-    overlap: response.overlap
-  };
 }
 
 function eventToTable(event) {
