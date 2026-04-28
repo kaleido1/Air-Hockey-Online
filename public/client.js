@@ -268,9 +268,11 @@ let canvasMetrics = null;
 let currentCursor = "";
 const predictedMallets = new Map();
 const LOCAL_PREDICTION_WINDOW_MS = 90;
-const LOCAL_PREDICTION_RELEASE_MS = 42;
+const LOCAL_PREDICTION_RELEASE_MS = 72;
 const LOCAL_REHIT_SUPPRESSION_MS = 10;
 const LOCAL_CONTACT_SEPARATION = 0.12;
+const LOCAL_CONTACT_SLOP = 1.4;
+const LOCAL_BLOCK_RELEASE_SPEED = 180;
 const ENABLE_LOCAL_PUCK_PREDICTION = true;
 const INPUT_SWEEP_STEP_PIXELS = 1.5;
 const MAX_INPUT_SWEEP_STEPS = 144;
@@ -1003,6 +1005,7 @@ function sendPointerFromPoint(point, force, targetIndex) {
   const previousPredicted = predictedMallets.get(targetIndex);
   const fromX = previousPredicted?.x ?? serverState?.mallets?.[targetIndex]?.x ?? constrained.x;
   const fromY = previousPredicted?.y ?? serverState?.mallets?.[targetIndex]?.y ?? constrained.y;
+  const predictedDt = clamp((now - previousInputAt) / 1000, 1 / 240, 1 / 24);
   if (serverState?.mallets?.[targetIndex]) {
     serverState.mallets[targetIndex].x = constrained.x;
     serverState.mallets[targetIndex].y = constrained.y;
@@ -1010,6 +1013,8 @@ function sendPointerFromPoint(point, force, targetIndex) {
   predictedMallets.set(targetIndex, {
     x: constrained.x,
     y: constrained.y,
+    vx: (constrained.x - fromX) / predictedDt,
+    vy: (constrained.y - fromY) / predictedDt,
     expiresAt: performance.now() + 180
   });
   if (ENABLE_LOCAL_PUCK_PREDICTION) {
@@ -1546,7 +1551,8 @@ function interpolateBody(from, to, alpha) {
   };
 }
 
-function displayPuck(puck) {
+function displayPuck(puck, state) {
+  maybePredictLocalBlockContact(puck, state);
   const prediction = localPredictedPucks.get(puck.id);
   const now = performance.now();
   if (prediction) {
@@ -1578,6 +1584,82 @@ function displayPuck(puck) {
     x: lerp(correction.fromX, correction.toX, blend),
     y: lerp(correction.fromY, correction.toY, blend)
   };
+}
+
+function maybePredictLocalBlockContact(puck, state) {
+  if (!ENABLE_LOCAL_PUCK_PREDICTION || serverState?.phase !== "playing") return;
+  if (!puck || localPredictedPucks.has(puck.id)) return;
+  const now = performance.now();
+  const minDistance = TABLE.malletRadius + TABLE.puckRadius;
+
+  for (const index of controlledMalletIndices()) {
+    const mallet = predictedMalletForPhysics(state?.mallets?.[index], index, now);
+    if (!mallet) continue;
+
+    let dx = puck.x - mallet.x;
+    let dy = puck.y - mallet.y;
+    let distance = Math.hypot(dx, dy);
+    if (distance > minDistance + LOCAL_CONTACT_SLOP) continue;
+    if (distance <= 0.001) {
+      dx = (mallet.vx || 0) - (puck.vx || 0);
+      dy = (mallet.vy || 0) - (puck.vy || 0);
+      distance = Math.hypot(dx, dy) || 1;
+    }
+
+    const nx = dx / distance;
+    const ny = dy / distance;
+    const relativeNormalSpeed = ((puck.vx || 0) - (mallet.vx || 0)) * nx + ((puck.vy || 0) - (mallet.vy || 0)) * ny;
+    const malletNormalSpeed = Math.max(0, (mallet.vx || 0) * nx + (mallet.vy || 0) * ny);
+    if (relativeNormalSpeed > LOCAL_BLOCK_RELEASE_SPEED * 0.5 && malletNormalSpeed < 90) continue;
+
+    let vx = puck.vx || 0;
+    let vy = puck.vy || 0;
+    if (relativeNormalSpeed < 0) {
+      const impulse = -1.72 * relativeNormalSpeed;
+      vx += nx * impulse;
+      vy += ny * impulse;
+    }
+
+    const targetNormalSpeed = Math.max(LOCAL_BLOCK_RELEASE_SPEED, malletNormalSpeed * 0.48);
+    const normalSpeed = vx * nx + vy * ny;
+    if (normalSpeed < targetNormalSpeed) {
+      const carry = targetNormalSpeed - normalSpeed;
+      vx += nx * carry;
+      vy += ny * carry;
+    }
+
+    localPredictedPucks.set(puck.id, {
+      x: mallet.x + nx * (minDistance + LOCAL_CONTACT_SEPARATION),
+      y: mallet.y + ny * (minDistance + LOCAL_CONTACT_SEPARATION),
+      vx,
+      vy,
+      startedAt: now,
+      expiresAt: now + LOCAL_PREDICTION_WINDOW_MS
+    });
+    lastLocalHitFxAt = now;
+    playFx("hit", 0.34);
+    return;
+  }
+}
+
+function controlledMalletIndices() {
+  if (isLocalGame()) return [0, 1];
+  return playerIndex === 0 || playerIndex === 1 ? [playerIndex] : [];
+}
+
+function predictedMalletForPhysics(mallet, index, now = performance.now()) {
+  const predicted = predictedMallets.get(index);
+  if (predicted && now <= predicted.expiresAt) {
+    return {
+      ...(mallet || {}),
+      x: predicted.x,
+      y: predicted.y,
+      vx: predicted.vx || 0,
+      vy: predicted.vy || 0
+    };
+  }
+  if (predicted) predictedMallets.delete(index);
+  return mallet || null;
 }
 
 function wrappedTickDelta(previousTick, nextTick) {
@@ -2619,7 +2701,7 @@ function drawGoalSlot(y, outer) {
 function drawState(state) {
   ctx.save();
   for (let index = 0; index < (state.pucks || []).length; index += 1) {
-    drawPuck(displayPuck(state.pucks[index]), index);
+    drawPuck(displayPuck(state.pucks[index], state), index);
   }
 
   for (let index = 0; index < state.mallets.length; index += 1) {

@@ -54,6 +54,7 @@ const STRIKE_ESCAPE_TRANSFER = 0.42;
 const PUCK_SUBSTEPS = 18;
 const INPUT_SWEEP_STEP_PIXELS = 1.5;
 const MAX_INPUT_SWEEP_STEPS = 144;
+const IMMEDIATE_HIT_STATE_GAP_MS = 10;
 const FRICTION_PER_SECOND = 0.991;
 const STUCK_SPEED = 95;
 const STUCK_SECONDS = 0.38;
@@ -571,6 +572,7 @@ function makeRoom(options = {}) {
     serverTick: 0,
     phaseStartedAt: Date.now(),
     lastSnapshotAt: 0,
+    lastHitStateAt: 0,
     lastFxAt: new Map(),
     botBrain: null,
     createdAt: Date.now(),
@@ -842,7 +844,7 @@ function applyDirectInputSweep(room, mallet, malletIndex, targetX, targetY, inpu
     }
   }
 
-  if (anyHit) sendRoomState(room, now, true);
+  if (anyHit) sendImmediateHitState(room, now);
 }
 
 function tickRooms() {
@@ -929,7 +931,7 @@ function resolveInputHits(room, mallet, malletIndex, dt, emitState = true) {
     capPuckSpeed(puck);
     emitFx(room, "hit", false, hit);
   }
-  if (anyHit && emitState) sendRoomState(room, Date.now(), true);
+  if (anyHit && emitState) sendImmediateHitState(room, Date.now());
   return anyHit;
 }
 
@@ -937,6 +939,7 @@ function stepPucks(room, dt) {
   const state = room.state;
   const scored = [];
   const activePucks = [];
+  let anyMalletHit = false;
 
   for (const puck of state.pucks) {
     puck.prevX = puck.x;
@@ -949,9 +952,15 @@ function stepPucks(room, dt) {
 
     collidePuckWithWalls(room, puck);
     const hitA = collidePuckWithMallet(room, puck, state.mallets[0], 0, dt);
-    if (hitA) emitFx(room, "hit", false, hitA);
+    if (hitA) {
+      anyMalletHit = true;
+      emitFx(room, "hit", false, hitA);
+    }
     const hitB = collidePuckWithMallet(room, puck, state.mallets[1], 1, dt);
-    if (hitB) emitFx(room, "hit", false, hitB);
+    if (hitB) {
+      anyMalletHit = true;
+      emitFx(room, "hit", false, hitB);
+    }
     forceSeparatePuckFromAllMallets(room, puck);
     collidePuckWithWalls(room, puck);
     rescueStuckPuck(room, puck, dt);
@@ -979,6 +988,7 @@ function stepPucks(room, dt) {
   }
 
   if (scored.length > 0) awardScoredPucks(room, scored);
+  if (anyMalletHit) sendImmediateHitState(room, Date.now());
 }
 
 function collidePuckWithWalls(room, puck) {
@@ -1806,6 +1816,12 @@ function sendRoomState(room, now = Date.now(), force = false) {
       })
     );
   }
+}
+
+function sendImmediateHitState(room, now = Date.now()) {
+  if (now - (room.lastHitStateAt || 0) < IMMEDIATE_HIT_STATE_GAP_MS) return;
+  room.lastHitStateAt = now;
+  sendRoomState(room, now, true);
 }
 
 function cleanupRooms() {
