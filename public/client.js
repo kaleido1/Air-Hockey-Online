@@ -276,21 +276,9 @@ const puckCorrections = new Map();
 const localPredictedPucks = new Map();
 let nextInputSeq = 1;
 let lastAckInputSeq = 0;
-const lastPeerInputSeqByPlayer = [0, 0];
 let lastLocalHitFxAt = 0;
 let lastServerTickExtended = null;
 let interpolationDelayMs = 16;
-const WEBRTC_ENABLED = window.AIR_HOCKEY_WEBRTC_ENABLED !== false && "RTCPeerConnection" in window;
-const WEBRTC_ICE_SERVERS =
-  Array.isArray(window.AIR_HOCKEY_WEBRTC_ICE_SERVERS) && window.AIR_HOCKEY_WEBRTC_ICE_SERVERS.length
-    ? window.AIR_HOCKEY_WEBRTC_ICE_SERVERS
-    : [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }];
-const WEBRTC_CHANNEL_OPTIONS = { ordered: false, maxRetransmits: 0 };
-let rtcPeer = null;
-let rtcChannel = null;
-let rtcPeerKey = "";
-let rtcNegotiating = false;
-let rtcConnected = false;
 
 applyLanguage();
 startRefreshRateSampling();
@@ -528,7 +516,6 @@ function connect() {
 
   socket.addEventListener("close", () => {
     connected = false;
-    closeWebRtc();
     clearTimeout(heartbeatTimer);
     els.connectionStatus.textContent = t("offline");
     setStatus("reconnecting");
@@ -571,19 +558,16 @@ function handleMessage(message) {
       showUi("waiting");
       setButtons();
       updateRoomLabels();
-      maybeStartWebRtc();
       break;
     case "room":
       roomPlayers = message.players || roomPlayers;
       updateRoomLabels(message);
       if (message.players?.[1]?.bot) setStatus("practice");
-      maybeStartWebRtc();
       break;
     case "started":
       roomMinimized = false;
       showUi(null);
       setStatus("getReady");
-      maybeStartWebRtc();
       break;
     case "score":
       playFx("score", 1);
@@ -610,9 +594,6 @@ function handleMessage(message) {
         measuredRttMs = measuredRttMs * 0.8 + rtt * 0.2;
         els.pingStatus.textContent = `${rtt} ms`;
       }
-      break;
-    case "webrtcSignal":
-      void handleWebRtcSignal(message);
       break;
     default:
       break;
@@ -648,9 +629,6 @@ function applyRealtimeState(message) {
       scheduleGameoverReturn();
       const self = playerIndex === 1 ? 1 : 0;
       if (serverState.winner === self) playFx("victory", 1);
-    }
-    if (serverState.phase !== "playing") {
-      localPredictedPucks.clear();
     }
     if (serverState.phase === "paused" || serverState.phase === "gameover") clearControls();
     if (serverState.phase !== "gameover" && gameoverReturnTimer) {
@@ -912,14 +890,11 @@ function clearRoom() {
   lastStateReceivedAt = 0;
   stateSnapshots.length = 0;
   roomPlayers = null;
-  closeWebRtc();
   predictedMallets.clear();
   puckCorrections.clear();
   localPredictedPucks.clear();
   nextInputSeq = 1;
   lastAckInputSeq = 0;
-  lastPeerInputSeqByPlayer[0] = 0;
-  lastPeerInputSeqByPlayer[1] = 0;
   lastServerTickExtended = null;
   interpolationDelayMs = 16;
   els.roomCode.textContent = "-";
@@ -935,12 +910,6 @@ function clearRoom() {
 }
 
 function applyPuckCorrection(nextState) {
-  if (nextState?.phase && nextState.phase !== "playing") {
-    puckCorrections.clear();
-    localPredictedPucks.clear();
-    return;
-  }
-
   if (!nextState?.pucks?.length || !serverState?.pucks?.length) {
     puckCorrections.clear();
     localPredictedPucks.clear();
@@ -966,10 +935,8 @@ function applyPuckCorrection(nextState) {
     const prediction = localPredictedPucks.get(puck.id);
     if (prediction) {
       const predictionDelta = Math.hypot(prediction.x - authoritative.x, prediction.y - authoritative.y);
-      if (predictionDelta < 3 || predictionDelta > 58 || prediction.expiresAt <= now) {
+      if (predictionDelta < 3 || prediction.expiresAt <= now) {
         localPredictedPucks.delete(puck.id);
-      } else if (predictionDelta > 24) {
-        prediction.expiresAt = Math.min(prediction.expiresAt, now + 28);
       }
     }
     const dx = puck.x - authoritative.x;
@@ -1054,15 +1021,15 @@ function sendPointerFromPoint(point, force, targetIndex) {
       now
     );
   }
-  const packet = encodeInputPacket({
-    inputSeq: nextInputSeq++,
-    clientTick: Math.round(now),
-    playerIndex: targetIndex,
-    x: constrained.x,
-    y: constrained.y
-  });
-  sendRealtime(packet);
-  sendPeerRealtime(packet);
+  sendRealtime(
+    encodeInputPacket({
+      inputSeq: nextInputSeq++,
+      clientTick: Math.round(now),
+      playerIndex: targetIndex,
+      x: constrained.x,
+      y: constrained.y
+    })
+  );
 }
 
 function applySegmentedLocalStrikePrediction(index, fromX, fromY, toX, toY, previousInputAt, now) {
@@ -1154,7 +1121,8 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
     const strike = Math.min(820, Math.max(staticKick, 180 + malletSpeed * 0.12));
     puck.vx = exitX * strike + moveX * sweepKick + sweepX * 9.5;
     puck.vy = exitY * strike + moveY * sweepKick + sweepY * 9.5;
-    advancePredictedPuck(puck, 0.014);
+    puck.x += puck.vx * 0.014;
+    puck.y += puck.vy * 0.014;
     puck.localPredictedAt = now;
     puck.localPredictionExpiresAt = now + LOCAL_PREDICTION_WINDOW_MS;
     localPredictedPucks.set(puck.id, {
@@ -1163,7 +1131,6 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
       vx: puck.vx,
       vy: puck.vy,
       startedAt: now,
-      lastAt: now,
       expiresAt: now + LOCAL_PREDICTION_WINDOW_MS
     });
     lastLocalHitFxAt = performance.now();
@@ -1197,97 +1164,6 @@ function findEarliestSweepContact(startX, startY, deltaX, deltaY, radius, epsilo
   const deltaLength = Math.sqrt(a);
   const rewind = Math.sqrt(Math.max(0, radiusWithEpsilon * radiusWithEpsilon - closestDistanceSq)) / deltaLength;
   return clamp(tClosest - rewind, 0, 1);
-}
-
-function advancePredictedPuck(puck, dt) {
-  const speed = Math.hypot(puck.vx || 0, puck.vy || 0);
-  const steps = clamp(Math.ceil((speed * dt) / 18), 1, 8);
-  const stepDt = dt / steps;
-  for (let step = 0; step < steps; step += 1) {
-    puck.x += (puck.vx || 0) * stepDt;
-    puck.y += (puck.vy || 0) * stepDt;
-    collidePredictedPuckWithWalls(puck);
-    separatePredictedPuckFromMallets(puck);
-    separatePredictedPuckFromOtherPucks(puck);
-    collidePredictedPuckWithWalls(puck);
-  }
-}
-
-function collidePredictedPuckWithWalls(puck) {
-  const r = TABLE.puckRadius;
-  const goalLeft = TABLE.width / 2 - TABLE.goalWidth / 2;
-  const goalRight = TABLE.width / 2 + TABLE.goalWidth / 2;
-  const insideGoal = puck.x > goalLeft && puck.x < goalRight;
-
-  if (puck.x < r) {
-    puck.x = r;
-    puck.vx = Math.abs(puck.vx || 0) * 0.94;
-  } else if (puck.x > TABLE.width - r) {
-    puck.x = TABLE.width - r;
-    puck.vx = -Math.abs(puck.vx || 0) * 0.94;
-  }
-
-  if (puck.y < r && !insideGoal) {
-    puck.y = r;
-    puck.vy = Math.abs(puck.vy || 0) * 0.94;
-  } else if (puck.y > TABLE.height - r && !insideGoal) {
-    puck.y = TABLE.height - r;
-    puck.vy = -Math.abs(puck.vy || 0) * 0.94;
-  }
-}
-
-function separatePredictedPuckFromMallets(puck) {
-  if (!serverState?.mallets?.length) return;
-  const minDistance = TABLE.malletRadius + TABLE.puckRadius + LOCAL_CONTACT_SEPARATION;
-  for (let index = 0; index < serverState.mallets.length; index += 1) {
-    const predicted = predictedMallets.get(index);
-    const mallet = predicted || serverState.mallets[index];
-    if (!mallet) continue;
-    let dx = puck.x - mallet.x;
-    let dy = puck.y - mallet.y;
-    let distance = Math.hypot(dx, dy);
-    if (distance >= minDistance) continue;
-    if (distance <= 0.001) {
-      dx = puck.vx || 0;
-      dy = puck.vy || (index === 0 ? -1 : 1);
-      distance = Math.hypot(dx, dy) || 1;
-    }
-
-    const nx = dx / distance;
-    const ny = dy / distance;
-    puck.x = mallet.x + nx * minDistance;
-    puck.y = mallet.y + ny * minDistance;
-
-    const malletVx = serverState.mallets[index]?.vx || 0;
-    const malletVy = serverState.mallets[index]?.vy || 0;
-    const relativeNormalSpeed = ((puck.vx || 0) - malletVx) * nx + ((puck.vy || 0) - malletVy) * ny;
-    if (relativeNormalSpeed < 0) {
-      const impulse = -1.72 * relativeNormalSpeed;
-      puck.vx = (puck.vx || 0) + nx * impulse;
-      puck.vy = (puck.vy || 0) + ny * impulse;
-    }
-  }
-}
-
-function separatePredictedPuckFromOtherPucks(puck) {
-  if (!serverState?.pucks?.length) return;
-  const minDistance = TABLE.puckRadius * 2 + LOCAL_CONTACT_SEPARATION;
-  for (const other of serverState.pucks) {
-    if (!other || other.id === puck.id) continue;
-    let dx = puck.x - other.x;
-    let dy = puck.y - other.y;
-    let distance = Math.hypot(dx, dy);
-    if (distance >= minDistance) continue;
-    if (distance <= 0.001) {
-      dx = puck.vx || 1;
-      dy = puck.vy || 0;
-      distance = Math.hypot(dx, dy) || 1;
-    }
-    const nx = dx / distance;
-    const ny = dy / distance;
-    puck.x = other.x + nx * minDistance;
-    puck.y = other.y + ny * minDistance;
-  }
 }
 
 function eventToTable(event) {
@@ -1349,186 +1225,6 @@ function send(message) {
 function sendRealtime(payload) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
   socket.send(payload);
-}
-
-function sendPeerRealtime(payload) {
-  if (!isPeerRealtimeReady()) return;
-  const bytes = payload instanceof Uint8Array ? payload : new Uint8Array(payload);
-  rtcChannel.send(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
-}
-
-function maybeStartWebRtc() {
-  if (!shouldUseWebRtc()) {
-    closeWebRtc();
-    return;
-  }
-
-  const nextKey = `${roomCode}:${playerIndex}:${roomPlayers?.map((player) => (player?.connected ? "1" : "0")).join("")}`;
-  if (rtcPeer && rtcPeerKey === nextKey) return;
-  closeWebRtc();
-  rtcPeerKey = nextKey;
-  const peer = createWebRtcPeer();
-
-  if (playerIndex === 0) {
-    bindWebRtcChannel(peer.createDataChannel("realtime", WEBRTC_CHANNEL_OPTIONS));
-    void sendWebRtcOffer(peer);
-  }
-}
-
-function shouldUseWebRtc() {
-  if (!WEBRTC_ENABLED || !connected || !roomCode || playerIndex === null || !roomSettings || !roomPlayers) return false;
-  if (roomSettings.local || roomSettings.bot) return false;
-  const humans = roomPlayers.filter((player) => player && !player.bot && player.connected);
-  return humans.length >= 2;
-}
-
-function createWebRtcPeer() {
-  const peer = new RTCPeerConnection({ iceServers: WEBRTC_ICE_SERVERS });
-  rtcPeer = peer;
-
-  peer.addEventListener("icecandidate", (event) => {
-    if (!event.candidate) return;
-    send({ type: "webrtcSignal", signal: { candidate: event.candidate.toJSON() } });
-  });
-
-  peer.addEventListener("datachannel", (event) => {
-    bindWebRtcChannel(event.channel);
-  });
-
-  peer.addEventListener("connectionstatechange", () => {
-    rtcConnected = peer.connectionState === "connected";
-    if (rtcConnected) {
-      els.connectionStatus.textContent = "P2P";
-    } else if (connected && els.connectionStatus.textContent === "P2P") {
-      els.connectionStatus.textContent = t("online");
-    }
-    if (peer.connectionState === "failed" || peer.connectionState === "closed") {
-      rtcConnected = false;
-    }
-  });
-
-  return peer;
-}
-
-async function sendWebRtcOffer(peer) {
-  if (rtcNegotiating || !peer || peer.signalingState !== "stable") return;
-  rtcNegotiating = true;
-  try {
-    const offer = await peer.createOffer();
-    if (peer.signalingState !== "stable") return;
-    await peer.setLocalDescription(offer);
-    send({ type: "webrtcSignal", signal: { description: peer.localDescription } });
-  } catch {
-    closeWebRtc();
-  } finally {
-    rtcNegotiating = false;
-  }
-}
-
-async function handleWebRtcSignal(message) {
-  if (!WEBRTC_ENABLED || !roomCode || playerIndex === null) return;
-  const signal = message.signal || {};
-  const peer = rtcPeer || createWebRtcPeer();
-
-  try {
-    if (signal.description) {
-      const description = signal.description;
-      await peer.setRemoteDescription(description);
-      if (description.type === "offer") {
-        const answer = await peer.createAnswer();
-        await peer.setLocalDescription(answer);
-        send({ type: "webrtcSignal", signal: { description: peer.localDescription } });
-      }
-    } else if (signal.candidate) {
-      await peer.addIceCandidate(signal.candidate);
-    }
-  } catch {
-    closeWebRtc();
-  }
-}
-
-function bindWebRtcChannel(channel) {
-  if (!channel) return;
-  rtcChannel = channel;
-  rtcChannel.binaryType = "arraybuffer";
-  rtcChannel.addEventListener("open", () => {
-    rtcConnected = true;
-    els.connectionStatus.textContent = "P2P";
-  });
-  rtcChannel.addEventListener("close", () => {
-    rtcConnected = false;
-    if (connected) els.connectionStatus.textContent = t("online");
-  });
-  rtcChannel.addEventListener("message", (event) => {
-    handlePeerRealtimeMessage(event.data);
-  });
-}
-
-function handlePeerRealtimeMessage(payload) {
-  const message = decodeRealtimePacket(payload, Date.now());
-  if (!message || message.type !== "input") return;
-  applyPeerInputPrediction(message);
-}
-
-function applyPeerInputPrediction(message) {
-  if (!serverState?.mallets?.[message.playerIndex] || !serverState?.pucks?.length) return;
-  if (message.playerIndex === playerIndex) return;
-
-  const now = performance.now();
-  const targetIndex = message.playerIndex;
-  if (!isNewerInputSeq(message.inputSeq, lastPeerInputSeqByPlayer[targetIndex])) return;
-  lastPeerInputSeqByPlayer[targetIndex] = message.inputSeq;
-  const constrained = constrainForPlayer(targetIndex, message.x, message.y);
-  const previousPredicted = predictedMallets.get(targetIndex);
-  const fromX = previousPredicted?.x ?? serverState.mallets[targetIndex].x ?? constrained.x;
-  const fromY = previousPredicted?.y ?? serverState.mallets[targetIndex].y ?? constrained.y;
-  const previousInputAt = lastInputAtByPlayer[targetIndex] || now - 1000 / 120;
-  lastInputAtByPlayer[targetIndex] = now;
-
-  serverState.mallets[targetIndex].x = constrained.x;
-  serverState.mallets[targetIndex].y = constrained.y;
-  predictedMallets.set(targetIndex, {
-    x: constrained.x,
-    y: constrained.y,
-    expiresAt: now + 180
-  });
-
-  if (ENABLE_LOCAL_PUCK_PREDICTION) {
-    applySegmentedLocalStrikePrediction(targetIndex, fromX, fromY, constrained.x, constrained.y, previousInputAt, now);
-  }
-}
-
-function isNewerInputSeq(next, previous) {
-  const a = next & 0xffff;
-  const b = previous & 0xffff;
-  if (a === b) return false;
-  return ((a - b + 0x10000) & 0xffff) < 0x8000;
-}
-
-function isPeerRealtimeReady() {
-  return shouldUseWebRtc() && rtcChannel?.readyState === "open";
-}
-
-function closeWebRtc() {
-  rtcPeerKey = "";
-  rtcConnected = false;
-  rtcNegotiating = false;
-  if (rtcChannel) {
-    try {
-      rtcChannel.close();
-    } catch {
-      // The browser may already have closed the channel.
-    }
-  }
-  if (rtcPeer) {
-    try {
-      rtcPeer.close();
-    } catch {
-      // The browser may already have closed the peer connection.
-    }
-  }
-  rtcChannel = null;
-  rtcPeer = null;
 }
 
 function getPlayerKey() {
@@ -1852,14 +1548,9 @@ function displayPuck(puck) {
   const prediction = localPredictedPucks.get(puck.id);
   const now = performance.now();
   if (prediction) {
-    if (serverState?.phase !== "playing" || now >= prediction.expiresAt) {
+    if (now >= prediction.expiresAt) {
       localPredictedPucks.delete(puck.id);
     } else {
-      const elapsed = clamp((now - (prediction.lastAt || now)) / 1000, 0, 1 / 30);
-      if (elapsed > 0) {
-        advancePredictedPuck(prediction, elapsed);
-        prediction.lastAt = now;
-      }
       return {
         ...puck,
         x: prediction.x,

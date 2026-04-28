@@ -1,10 +1,11 @@
-# Free WebRTC + Render Deployment
+# Free Render Deployment
 
-This project now uses a free-first realtime setup:
+This project currently uses a free-first, server-authoritative realtime setup:
 
-- Render Free Web Service hosts the page, room flow, WebSocket fallback, and WebRTC signaling.
-- Browser-to-browser WebRTC DataChannel carries low-latency peer input hints when two remote humans are in the same room.
-- Existing WebSocket server-authoritative sync remains the fallback and correction path.
+- Render Free Web Service hosts the page, room flow, and WebSocket realtime transport.
+- The browser sends local input immediately to Render while also showing local hit feedback for the controlling player.
+- Render remains authoritative for puck physics, scoring, pause, reset, and final correction.
+- WebRTC peer gameplay prediction is disabled in production because it can make the puck react to non-authoritative remote hints and create non-physical motion.
 
 ## Render
 
@@ -18,36 +19,13 @@ region: singapore
 The service exposes:
 
 - `/` for the game
-- `/ws` for WebSocket signaling and fallback realtime
-- `/runtime-config.js` for browser runtime transport config
+- `/ws` for authoritative WebSocket realtime
+- `/runtime-config.js` for browser runtime config
 - `/healthz` for optional uptime checks
 
-## Free ICE Configuration
+## Runtime Behavior
 
-The default ICE config is STUN-only:
-
-```json
-[
-  {
-    "urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]
-  }
-]
-```
-
-This is fully free and works for many home/mobile networks. It does not include TURN relay. If two players are both behind strict NATs and cannot establish P2P, the game automatically keeps using the existing WebSocket path.
-
-## Runtime Environment Variables
-
-```text
-AIR_HOCKEY_WEBRTC_SIGNALING=1
-AIR_HOCKEY_WEBRTC_ICE_SERVERS=[{"urls":["stun:stun.l.google.com:19302","stun:stun1.l.google.com:19302"]}]
-```
-
-To disable WebRTC without changing code:
-
-```text
-AIR_HOCKEY_WEBRTC_SIGNALING=0
-```
+The code path is intentionally WebSocket-first on Render Free. This keeps all multiplayer modes using the same server-owned physics result instead of mixing authoritative state with peer-to-peer prediction.
 
 ## Optional Free Keepalive
 
@@ -61,6 +39,4 @@ Use an interval longer than 10 minutes and keep an eye on Render's free instance
 
 ## Current Transport Behavior
 
-The game still sends authoritative input to Render over WebSocket so scoring, reset, pause, and final correction remain consistent.
-
-When WebRTC succeeds, each browser also sends its local input directly to the other browser over an unordered, zero-retransmit DataChannel. The receiving browser uses that direct input for faster opponent mallet and puck prediction, which reduces perceived multiplayer delay while preserving the existing fallback.
+All inputs go to Render over WebSocket. The local player still gets immediate visual/audio hit feedback, but puck ownership, collisions, goals, reset, pause, and final corrections all come back from the authoritative server.
