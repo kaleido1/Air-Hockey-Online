@@ -1,4 +1,4 @@
-import { decodeRealtimePacket, encodeInputPacket } from "./protocol.js";
+import { decodeRealtimePacket, encodeInputPacket, encodePhysicsPacket } from "./protocol.js";
 
 const canvas = document.querySelector("#rink");
 const isAndroid = /Android/i.test(navigator.userAgent || "");
@@ -1828,6 +1828,30 @@ function sendPointerFromPoint(point, force, targetIndex) {
       y: constrained.y
     })
   );
+  sendOnlineMatterPhysicsSync(inputSeq, targetIndex, now);
+}
+
+function sendOnlineMatterPhysicsSync(inputSeq, targetIndex, now) {
+  if (!isNetworkedRoom() || !serverState?.pucks?.length) return;
+  const pucks = serverState.pucks.map((puck) => {
+    const prediction = localPredictedPucks.get(puck.id);
+    const body = prediction ? advanceLocalPuckPrediction(prediction, now) : puck;
+    return {
+      id: puck.id,
+      x: body.x,
+      y: body.y,
+      vx: body.vx || 0,
+      vy: body.vy || 0
+    };
+  });
+  sendRealtime(
+    encodePhysicsPacket({
+      inputSeq,
+      playerIndex: targetIndex,
+      mallets: serverState.mallets,
+      pucks
+    })
+  );
 }
 
 function applySegmentedLocalStrikePrediction(index, fromX, fromY, toX, toY, previousInputAt, now, inputSeq = 0) {
@@ -2184,6 +2208,10 @@ function isLocalGame() {
 
 function isOnlineRoom() {
   return Boolean(roomCode && roomSettings && !roomSettings.lan && !roomSettings.local && !roomSettings.bot);
+}
+
+function isNetworkedRoom() {
+  return Boolean(roomCode && roomSettings && !roomSettings.local && !roomSettings.bot);
 }
 
 function shouldExposeRoomInUrl() {
