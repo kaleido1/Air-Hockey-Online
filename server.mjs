@@ -47,6 +47,8 @@ const STATIC_PUCK_SPEED = 70;
 const STATIC_STRIKE_MIN_SPEED = 520;
 const STATIC_SWEEP_MIN_SPEED = 460;
 const EDGE_BLOCK_RESPONSE_SPEED = 48;
+const STRONG_STRIKE_MIN_SPEED = 180;
+const STRIKE_ESCAPE_TRANSFER = 0.42;
 const PUCK_SUBSTEPS = 18;
 const FRICTION_PER_SECOND = 0.991;
 const STUCK_SPEED = 95;
@@ -860,9 +862,7 @@ function resolveInputHits(room, mallet, malletIndex, dt) {
     const hit = collidePuckWithMallet(room, puck, mallet, malletIndex, dt);
     if (!hit) continue;
     anyHit = true;
-    for (const currentMallet of room.state.mallets) {
-      forceSeparatePuckFromMallet(room, puck, currentMallet);
-    }
+    forceSeparatePuckFromAllMallets(room, puck);
     collidePuckWithWalls(room, puck);
     capPuckSpeed(puck);
     emitFx(room, "hit", false, hit);
@@ -889,9 +889,7 @@ function stepPucks(room, dt) {
     if (hitA) emitFx(room, "hit", false, hitA);
     const hitB = collidePuckWithMallet(room, puck, state.mallets[1], 1, dt);
     if (hitB) emitFx(room, "hit", false, hitB);
-    for (const mallet of state.mallets) {
-      forceSeparatePuckFromMallet(room, puck, mallet);
-    }
+    forceSeparatePuckFromAllMallets(room, puck);
     collidePuckWithWalls(room, puck);
     rescueStuckPuck(room, puck, dt);
     capPuckSpeed(puck);
@@ -1013,11 +1011,25 @@ function forceSeparatePuckFromMallet(room, puck, mallet) {
   puck.y += ny * overlap;
 
   const relativeNormalSpeed = (puck.vx - mallet.vx) * nx + (puck.vy - mallet.vy) * ny;
-  if (relativeNormalSpeed < EDGE_BLOCK_RESPONSE_SPEED) {
-    const correction = EDGE_BLOCK_RESPONSE_SPEED - relativeNormalSpeed;
+  const strikeSpeed = Math.max(0, mallet.vx * nx + mallet.vy * ny);
+  const escapeSpeed = Math.max(
+    EDGE_BLOCK_RESPONSE_SPEED,
+    strikeSpeed * STRIKE_ESCAPE_TRANSFER,
+    overlap > 3 ? PUCK_MIN_LIVE_SPEED * 0.9 : 0
+  );
+  if (relativeNormalSpeed < escapeSpeed) {
+    const correction = escapeSpeed - relativeNormalSpeed;
     puck.vx += nx * correction;
     puck.vy += ny * correction;
     capPuckSpeed(puck);
+  }
+}
+
+function forceSeparatePuckFromAllMallets(room, puck) {
+  for (let pass = 0; pass < 2; pass += 1) {
+    for (const mallet of room.state.mallets) {
+      forceSeparatePuckFromMallet(room, puck, mallet);
+    }
   }
 }
 
@@ -1130,6 +1142,7 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   const relativeNormalSpeed = rvx * nx + rvy * ny;
   const strikeSpeed = Math.max(0, strikeVx * nx + strikeVy * ny);
   const malletSpeed = Math.hypot(strikeVx, strikeVy);
+  const strongDrive = strikeSpeed >= STRONG_STRIKE_MIN_SPEED || malletSpeed >= 520;
   const moveX = malletSpeed > 0.001 ? strikeVx / malletSpeed : nx;
   const moveY = malletSpeed > 0.001 ? strikeVy / malletSpeed : ny;
   const puckSpeed = Math.hypot(puck.vx, puck.vy);
@@ -1154,11 +1167,12 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
     puck.x = anchorX + exitX * (minDistance + CONTACT_SEPARATION);
     puck.y = anchorY + exitY * (minDistance + CONTACT_SEPARATION);
   }
-  if (!sweptHit && distance > minDistance && relativeNormalSpeed >= -15) {
+  if (!sweptHit && distance > minDistance && relativeNormalSpeed >= -15 && !strongDrive) {
     return false;
   }
   const repeatedContact =
     !activeStaticPush &&
+    !strongDrive &&
     puck.lastMalletHitIndex === malletIndex &&
     now - (puck.lastMalletHitAt || 0) < MALLET_HIT_COOLDOWN_MS &&
     relativeNormalSpeed > -80;
