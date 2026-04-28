@@ -1,4 +1,4 @@
-import { decodeRealtimePacket, encodeInputPacket, encodePhysicsPacket } from "./protocol.js";
+import { decodeRealtimePacket, encodeInputPacket } from "./protocol.js";
 
 const canvas = document.querySelector("#rink");
 const isAndroid = /Android/i.test(navigator.userAgent || "");
@@ -44,6 +44,8 @@ const TABLE = {
   puckRadius: 29,
   firstTo: 7
 };
+
+const MALLET_START_OFFSET = TABLE.malletRadius + 84;
 
 const colors = {
   puck: "#ff3b15",
@@ -639,6 +641,7 @@ function handleRealtimeMessage(packet) {
 }
 
 function applyRealtimeState(message) {
+  adoptRemoteHitPredictions(serverState, message.state);
   applyPuckCorrection(message.state, message.ackInputSeq || 0);
   previousState = serverState;
   serverState = message.state;
@@ -666,6 +669,32 @@ function applyRealtimeState(message) {
     showUi(null);
   } else if (message.state.phase === "waiting" && roomCode && !roomMinimized) {
     showUi("waiting");
+  }
+}
+
+function adoptRemoteHitPredictions(previous, next) {
+  if (offlineGame || next?.phase !== "playing" || !next?.pucks?.length) return;
+  const now = performance.now();
+  const previousPucks = new Map((previous?.pucks || []).map((puck) => [puck.id, puck]));
+  for (const puck of next.pucks) {
+    if (isControlledMalletIndex(puck.lastMalletHitIndex)) continue;
+    const previousPuck = previousPucks.get(puck.id);
+    if (!previousPuck) continue;
+    const previousHitSerial = previousPuck.hitSerial || 0;
+    const nextHitSerial = puck.hitSerial || 0;
+    if (!nextHitSerial || nextHitSerial === previousHitSerial) continue;
+    localPredictedPucks.set(puck.id, {
+      x: puck.x,
+      y: puck.y,
+      vx: puck.vx || 0,
+      vy: puck.vy || 0,
+      inputSeq: 0,
+      ownerIndex: puck.lastMalletHitIndex,
+      serverHitSerial: nextHitSerial,
+      startedAt: now,
+      updatedAt: now,
+      expiresAt: now + Math.max(150, localPuckPredictionWindowMs())
+    });
   }
 }
 
@@ -907,6 +936,8 @@ function startOfflineGame(mode, count = puckCount) {
     return;
   }
 
+  const bottomStart = getMalletStart(0);
+  const topStart = getMalletStart(1);
   const engine = MatterLib.Engine.create({ enableSleeping: false });
   engine.gravity.y = 0;
   engine.gravity.x = 0;
@@ -919,8 +950,8 @@ function startOfflineGame(mode, count = puckCount) {
     lastScorer: null,
     winner: null,
     mallets: [
-      { x: TABLE.width / 2, y: TABLE.height * 0.78, vx: 0, vy: 0 },
-      { x: TABLE.width / 2, y: TABLE.height * 0.22, vx: 0, vy: 0 }
+      { x: bottomStart.x, y: bottomStart.y, vx: 0, vy: 0 },
+      { x: topStart.x, y: topStart.y, vx: 0, vy: 0 }
     ],
     pucks: []
   };
@@ -1053,13 +1084,19 @@ function resetOfflinePucks(scorer) {
   offlineGame.bodies.clear();
   offlineGame.state.pucks = [];
   const server = scorer === 0 ? 1 : scorer === 1 ? 0 : Math.random() > 0.5 ? 0 : 1;
-  const serveY = server === 0 ? TABLE.height * 0.64 : TABLE.height * 0.36;
+  const serveY = getServeAnchorY(server);
   for (let index = 0; index < offlineGame.puckCount; index += 1) {
     const offset = offlineGame.puckCount === 1 ? 0 : index === 0 ? -58 : 58;
+    const position = chooseSafeServePosition(
+      offlineGame.state,
+      TABLE.width / 2 + offset,
+      serveY + (offlineGame.puckCount === 1 ? 0 : index === 0 ? -18 : 18),
+      server
+    );
     const puck = {
       id: `p${index}`,
-      x: TABLE.width / 2 + offset,
-      y: serveY + (offlineGame.puckCount === 1 ? 0 : index === 0 ? -18 : 18),
+      x: position.x,
+      y: position.y,
       vx: 0,
       vy: 0,
       lastMalletHitIndex: null,
@@ -1769,7 +1806,7 @@ function sendRelativePointer(event, force, targetIndex) {
     predictedMallets.get(targetIndex) ||
     serverState?.mallets?.[targetIndex] || {
       x: TABLE.width / 2,
-      y: targetIndex === 0 ? TABLE.height * 0.78 : TABLE.height * 0.22
+      y: getMalletStart(targetIndex).y
     };
   const metrics = canvasMetrics || measureCanvas();
   const deltaX = (event.movementX / metrics.width) * TABLE.width;
@@ -1834,30 +1871,6 @@ function sendPointerFromPoint(point, force, targetIndex) {
       playerIndex: targetIndex,
       x: constrained.x,
       y: constrained.y
-    })
-  );
-  sendOnlineMatterPhysicsSync(inputSeq, targetIndex, now);
-}
-
-function sendOnlineMatterPhysicsSync(inputSeq, targetIndex, now) {
-  if (!isNetworkedRoom() || !serverState?.pucks?.length) return;
-  const pucks = serverState.pucks.map((puck) => {
-    const prediction = localPredictedPucks.get(puck.id);
-    const body = prediction ? advanceLocalPuckPrediction(prediction, now) : puck;
-    return {
-      id: puck.id,
-      x: body.x,
-      y: body.y,
-      vx: body.vx || 0,
-      vy: body.vy || 0
-    };
-  });
-  sendRealtime(
-    encodePhysicsPacket({
-      inputSeq,
-      playerIndex: targetIndex,
-      mallets: serverState.mallets,
-      pucks
     })
   );
 }
@@ -2222,8 +2235,74 @@ function isOnlineRoom() {
   return Boolean(roomCode && roomSettings && !roomSettings.lan && !roomSettings.local && !roomSettings.bot);
 }
 
-function isNetworkedRoom() {
-  return Boolean(roomCode && roomSettings && !roomSettings.local && !roomSettings.bot);
+function getMalletStart(index) {
+  return {
+    x: TABLE.width / 2,
+    y: index === 0 ? TABLE.height - MALLET_START_OFFSET : MALLET_START_OFFSET
+  };
+}
+
+function getServeAnchorY(server) {
+  return server === 0 ? TABLE.height * 0.61 : TABLE.height * 0.39;
+}
+
+function chooseSafeServePosition(state, preferredX, preferredY, server) {
+  const r = TABLE.puckRadius;
+  const top = server === 0 ? TABLE.height / 2 + r + 12 : r + 12;
+  const bottom = server === 0 ? TABLE.height - r - 12 : TABLE.height / 2 - r - 12;
+  const safeDistance = TABLE.malletRadius + TABLE.puckRadius + LOCAL_CONTACT_SEPARATION + 12;
+  const puckDistance = TABLE.puckRadius * 2 + 16;
+  const centerX = TABLE.width / 2;
+  const laneStep = 54;
+  const rowStep = 46;
+  const candidates = [];
+
+  for (const row of [0, 1, -1, 2, -2, 3, -3, 4, -4]) {
+    for (const lane of [0, -1, 1, -2, 2, -3, 3, -4, 4]) {
+      candidates.push({
+        x: clamp(preferredX + lane * laneStep, r + 12, TABLE.width - r - 12),
+        y: clamp(preferredY + row * rowStep, top, bottom)
+      });
+    }
+  }
+
+  const valid = candidates.find((candidate) =>
+    isSafeServeCandidate(candidate, state, safeDistance, puckDistance)
+  );
+  if (valid) return valid;
+
+  let fallback = {
+    x: clamp(preferredX, r + 12, TABLE.width - r - 12),
+    y: clamp(preferredY, top, bottom)
+  };
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    for (const mallet of state.mallets || []) {
+      let dx = fallback.x - mallet.x;
+      let dy = fallback.y - mallet.y;
+      let distance = Math.hypot(dx, dy);
+      if (distance >= safeDistance) continue;
+      if (distance <= 0.001) {
+        dx = fallback.x < centerX ? -0.55 : 0.55;
+        dy = server === 0 ? 1 : -1;
+        distance = Math.hypot(dx, dy);
+      }
+      fallback = {
+        x: clamp(mallet.x + (dx / distance) * safeDistance, r + 12, TABLE.width - r - 12),
+        y: clamp(mallet.y + (dy / distance) * safeDistance, top, bottom)
+      };
+    }
+  }
+  return fallback;
+}
+
+function isSafeServeCandidate(candidate, state, malletDistance, puckDistance) {
+  for (const mallet of state.mallets || []) {
+    if (Math.hypot(candidate.x - mallet.x, candidate.y - mallet.y) < malletDistance) return false;
+  }
+  for (const puck of state.pucks || []) {
+    if (Math.hypot(candidate.x - puck.x, candidate.y - puck.y) < puckDistance) return false;
+  }
+  return true;
 }
 
 function shouldExposeRoomInUrl() {

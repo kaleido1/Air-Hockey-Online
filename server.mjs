@@ -294,8 +294,6 @@ function handleRealtimePacket(client, payload) {
   if (!packet) return;
   if (packet.type === "input") {
     updateInput(client, packet);
-  } else if (packet.type === "physics") {
-    updateClientPhysicsState(client, packet);
   }
 }
 
@@ -856,64 +854,6 @@ function applyDirectInputSweep(room, mallet, malletIndex, targetX, targetY, inpu
 
   if (anyHit) sendImmediateHitState(room, now);
   sendInputState(room, now);
-}
-
-function updateClientPhysicsState(client, message) {
-  const room = currentRoom(client);
-  if (!room || client.playerIndex === null || room.settings.local || room.players[client.playerIndex]?.bot) return;
-  if (room.state.phase !== "playing") return;
-
-  const playerIndex = client.playerIndex;
-  const malletUpdate = message.mallets?.[playerIndex];
-  const mallet = room.state.mallets[playerIndex];
-  if (malletUpdate && Number.isFinite(malletUpdate.x) && Number.isFinite(malletUpdate.y)) {
-    const constrained = constrainMallet(playerIndex, malletUpdate.x, malletUpdate.y);
-    mallet.sweepFromX = mallet.x;
-    mallet.sweepFromY = mallet.y;
-    mallet.x = constrained.x;
-    mallet.y = constrained.y;
-    mallet.targetX = constrained.x;
-    mallet.targetY = constrained.y;
-    mallet.vx = clamp(Number(malletUpdate.vx) || 0, -HUMAN_MALLET_MAX_SPEED, HUMAN_MALLET_MAX_SPEED);
-    mallet.vy = clamp(Number(malletUpdate.vy) || 0, -HUMAN_MALLET_MAX_SPEED, HUMAN_MALLET_MAX_SPEED);
-    mallet.lastInputAt = Date.now();
-    mallet.directInputUntil = Date.now() + 90;
-  }
-
-  const incomingPucks = new Map((message.pucks || []).map((puck) => [puck.id, puck]));
-  for (let index = 0; index < room.state.pucks.length; index += 1) {
-    const puck = room.state.pucks[index];
-    const update = incomingPucks.get(puck.id || `p${index}`);
-    if (!update || !Number.isFinite(update.x) || !Number.isFinite(update.y)) continue;
-    if (!shouldAcceptClientPuckUpdate(room, playerIndex, puck, update)) continue;
-    puck.prevX = puck.x;
-    puck.prevY = puck.y;
-    puck.x = clamp(Number(update.x), TABLE.puckRadius, TABLE.width - TABLE.puckRadius);
-    puck.y = clamp(Number(update.y), -TABLE.puckRadius * 1.2, TABLE.height + TABLE.puckRadius * 1.2);
-    puck.vx = clamp(Number(update.vx) || 0, -PUCK_MAX_SPEED, PUCK_MAX_SPEED);
-    puck.vy = clamp(Number(update.vy) || 0, -PUCK_MAX_SPEED, PUCK_MAX_SPEED);
-    capPuckSpeed(puck);
-  }
-
-  client.lastInputSeq = Number(message.inputSeq) || client.lastInputSeq || 0;
-  room.updatedAt = Date.now();
-  sendInputState(room, room.updatedAt);
-}
-
-function shouldAcceptClientPuckUpdate(room, playerIndex, puck, update) {
-  const existingSpeed = Math.hypot(puck.vx || 0, puck.vy || 0);
-  const updateSpeed = Math.hypot(update.vx || 0, update.vy || 0);
-  if (updateSpeed > PUCK_MAX_SPEED * 1.08) return false;
-
-  const distance = Math.hypot((update.x || 0) - puck.x, (update.y || 0) - puck.y);
-  if (distance > 180 && existingSpeed > 80) return false;
-
-  const playerOwnsHalf = playerIndex === 0 ? update.y >= TABLE.centerY - 90 : update.y <= TABLE.centerY + 90;
-  const sameRecentHit = puck.lastMalletHitIndex === playerIndex && Date.now() - (puck.lastMalletHitAt || 0) < 900;
-  const nearPlayerMallet =
-    Math.hypot(update.x - room.state.mallets[playerIndex].x, update.y - room.state.mallets[playerIndex].y) <
-    TABLE.malletRadius + TABLE.puckRadius + 90;
-  return playerOwnsHalf || sameRecentHit || nearPlayerMallet;
 }
 
 function tickRooms() {
@@ -1772,7 +1712,7 @@ function resetPucks(room, scorer) {
   const count = room.settings.puckCount;
   const server =
     scorer === 0 ? 1 : scorer === 1 ? 0 : Math.random() > 0.5 ? 0 : 1;
-  const serveY = server === 0 ? TABLE.height * 0.64 : TABLE.height * 0.36;
+  const serveY = getServeAnchorY(server);
   room.state.pucks = [];
   for (let index = 0; index < count; index += 1) {
     const offset = count === 1 ? 0 : index === 0 ? -58 : 58;
@@ -1853,6 +1793,8 @@ function isSafeServeCandidate(candidate, state, malletDistance, puckDistance) {
 }
 
 function initialState(puckCount = 1) {
+  const bottomStart = getMalletStart(0);
+  const topStart = getMalletStart(1);
   const state = {
     phase: "waiting",
     phaseEndsAt: 0,
@@ -1861,12 +1803,12 @@ function initialState(puckCount = 1) {
     winner: null,
     mallets: [
       {
-        x: TABLE.width / 2,
-        y: TABLE.height * 0.78,
-        targetX: TABLE.width / 2,
-        targetY: TABLE.height * 0.78,
-        sweepFromX: TABLE.width / 2,
-        sweepFromY: TABLE.height * 0.78,
+        x: bottomStart.x,
+        y: bottomStart.y,
+        targetX: bottomStart.x,
+        targetY: bottomStart.y,
+        sweepFromX: bottomStart.x,
+        sweepFromY: bottomStart.y,
         vx: 0,
         vy: 0,
         lastInputAt: 0,
@@ -1874,12 +1816,12 @@ function initialState(puckCount = 1) {
         hasPendingSweep: false
       },
       {
-        x: TABLE.width / 2,
-        y: TABLE.height * 0.22,
-        targetX: TABLE.width / 2,
-        targetY: TABLE.height * 0.22,
-        sweepFromX: TABLE.width / 2,
-        sweepFromY: TABLE.height * 0.22,
+        x: topStart.x,
+        y: topStart.y,
+        targetX: topStart.x,
+        targetY: topStart.y,
+        sweepFromX: topStart.x,
+        sweepFromY: topStart.y,
         vx: 0,
         vy: 0,
         lastInputAt: 0,
@@ -1899,10 +1841,7 @@ function initialState(puckCount = 1) {
 }
 
 function centerMallets(state) {
-  const starts = [
-    { x: TABLE.width / 2, y: TABLE.height * 0.78 },
-    { x: TABLE.width / 2, y: TABLE.height * 0.22 }
-  ];
+  const starts = [getMalletStart(0), getMalletStart(1)];
 
   state.mallets.forEach((mallet, index) => {
     mallet.x = starts[index].x;
@@ -1917,6 +1856,18 @@ function centerMallets(state) {
     mallet.sweepStartedAt = 0;
     mallet.hasPendingSweep = false;
   });
+}
+
+function getMalletStart(index) {
+  const goalFrontOffset = TABLE.malletRadius + 84;
+  return {
+    x: TABLE.width / 2,
+    y: index === 0 ? TABLE.height - goalFrontOffset : goalFrontOffset
+  };
+}
+
+function getServeAnchorY(server) {
+  return server === 0 ? TABLE.height * 0.61 : TABLE.height * 0.39;
 }
 
 function sendSnapshots() {

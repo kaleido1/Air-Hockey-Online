@@ -1,8 +1,7 @@
 const MESSAGE = {
   INPUT: 1,
   STATE: 2,
-  FX: 3,
-  PHYSICS: 4
+  FX: 3
 };
 
 const PHASES = ["waiting", "countdown", "playing", "point", "paused", "gameover"];
@@ -32,59 +31,6 @@ export function decodeInputPacket(packet) {
     playerIndex: bytes[5],
     x: view.getUint16(6),
     y: view.getUint16(8)
-  };
-}
-
-export function encodePhysicsPacket({ inputSeq, playerIndex, mallets = [], pucks = [] }) {
-  const packet = new Uint8Array(37);
-  const view = new DataView(packet.buffer);
-  packet[0] = MESSAGE.PHYSICS;
-  view.setUint16(1, inputSeq & 0xffff);
-  packet[3] = clampByte(playerIndex);
-  let puckMask = 0;
-  for (let index = 0; index < Math.min(MAX_PUCKS, pucks.length); index += 1) {
-    puckMask |= 1 << index;
-  }
-  packet[4] = puckMask;
-
-  let offset = 5;
-  for (let index = 0; index < 2; index += 1) {
-    writeBody(view, offset, mallets[index]);
-    offset += 8;
-  }
-  for (let index = 0; index < MAX_PUCKS; index += 1) {
-    writeBody(view, offset, pucks[index]);
-    offset += 8;
-  }
-  return packet;
-}
-
-export function decodePhysicsPacket(packet) {
-  const bytes = ensureUint8Array(packet);
-  if (bytes.length < 37 || bytes[0] !== MESSAGE.PHYSICS) return null;
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const puckMask = bytes[4];
-  let offset = 5;
-  const mallets = [];
-  for (let index = 0; index < 2; index += 1) {
-    mallets.push(readBody(view, offset));
-    offset += 8;
-  }
-  const pucks = [];
-  for (let index = 0; index < MAX_PUCKS; index += 1) {
-    const body = readBody(view, offset);
-    if (puckMask & (1 << index)) {
-      body.id = `p${index}`;
-      pucks.push(body);
-    }
-    offset += 8;
-  }
-  return {
-    type: "physics",
-    inputSeq: view.getUint16(1),
-    playerIndex: bytes[3],
-    mallets,
-    pucks
   };
 }
 
@@ -219,8 +165,6 @@ export function decodeRealtimePacket(packet, now = Date.now()) {
       return decodeStatePacket(bytes, now);
     case MESSAGE.FX:
       return decodeFxPacket(bytes);
-    case MESSAGE.PHYSICS:
-      return decodePhysicsPacket(bytes);
     default:
       return null;
   }
