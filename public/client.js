@@ -224,6 +224,7 @@ let audioUnlockPromise = null;
 let audioUnlockedByGesture = false;
 let audioActivationPrimed = false;
 let audioNeedsTouchReactivate = false;
+let audioNeedsFreshContext = false;
 let statusRaw = "chooseMode";
 let statusText = t("chooseMode");
 const playerKey = getPlayerKey();
@@ -2519,10 +2520,12 @@ function ensureAudioContext() {
 
 function activateAudioFromGesture() {
   if (!soundEnabled) return Promise.resolve(false);
+  if (audioNeedsFreshContext) resetAudioContext();
   const context = ensureAudioContext();
   if (!context) return Promise.resolve(false);
   const needsReactivate = audioNeedsTouchReactivate;
   audioNeedsTouchReactivate = false;
+  audioNeedsFreshContext = false;
   audioUnlockedByGesture = true;
   if (context.state === "running" && !needsReactivate) {
     finishAudioActivation();
@@ -2533,8 +2536,22 @@ function activateAudioFromGesture() {
 
 function markAudioForTouchReactivate() {
   audioNeedsTouchReactivate = true;
+  if (isIOS) audioNeedsFreshContext = true;
   audioActivationPrimed = false;
   audioPrimed = false;
+}
+
+function resetAudioContext() {
+  const oldAudio = audio;
+  audio = null;
+  audioMasterGain = null;
+  audioPrimed = false;
+  audioActivationPrimed = false;
+  audioUnlockPromise = null;
+  audioUnlockedByGesture = false;
+  if (oldAudio && typeof oldAudio.close === "function") {
+    oldAudio.close().catch(() => {});
+  }
 }
 
 function getAudioOutput() {
@@ -2607,12 +2624,18 @@ function recoverAudioContext() {
     return audio
       .resume()
       .then(() => finishAudioActivation())
-      .catch(() => false);
+      .catch(() => {
+        if (isIOS) audioNeedsFreshContext = true;
+        return false;
+      });
   }
   return audio
     .resume()
     .then(() => finishAudioActivation())
-    .catch(() => false);
+    .catch(() => {
+      if (isIOS) audioNeedsFreshContext = true;
+      return false;
+    });
 }
 
 function unlockAudio(fromGesture = true) {
@@ -2636,7 +2659,10 @@ function unlockAudio(fromGesture = true) {
         if (!audioUnlockedByGesture) return context.state === "running";
         return finishAudioActivation();
       })
-      .catch(() => false)
+      .catch(() => {
+        if (isIOS) audioNeedsFreshContext = true;
+        return false;
+      })
       .finally(() => {
         audioUnlockPromise = null;
       });
