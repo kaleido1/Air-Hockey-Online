@@ -254,6 +254,7 @@ let uiTransitionStartedAt = performance.now();
 let pendingStartMode = "bot";
 let pendingModeStartAction = null;
 let menuButtons = [];
+const pendingPointerUiActions = new Map();
 let soundEnabled = getInitialSoundEnabled();
 let audioSessionArmed = !isIOS;
 let localPointerMalletIndex = 0;
@@ -353,6 +354,7 @@ window.addEventListener("pageshow", () => {
 function armAudioSessionFromModeButton() {
   audioSessionArmed = true;
   soundEnabled = true;
+  persistSoundEnabled();
   applyAudioSessionType("playback");
   primeModeButtonAudioUnlock();
   return activateAudioFromGesture();
@@ -446,7 +448,7 @@ canvas.addEventListener("pointerdown", (event) => {
   }
   measureCanvas();
   const point = eventToCanvas(event);
-  if (point && handleCanvasUi(point, event.detail || 1)) {
+  if (point && handleCanvasUi(point, event.detail || 1, event)) {
     suppressedGameplayPointers.add(event.pointerId);
     pointerDown = false;
     try {
@@ -513,7 +515,10 @@ window.addEventListener(
 
 canvas.addEventListener("pointerup", (event) => {
   pointerDown = false;
-  if (suppressedGameplayPointers.delete(event.pointerId)) return;
+  if (suppressedGameplayPointers.delete(event.pointerId)) {
+    runPendingPointerUiAction(event.pointerId);
+    return;
+  }
   if (isActivePlay()) {
     if (!(isLocalGame() && event.pointerType !== "touch")) {
       const localIndex = activePointers.get(event.pointerId);
@@ -523,9 +528,21 @@ canvas.addEventListener("pointerup", (event) => {
   activePointers.delete(event.pointerId);
 });
 
+window.addEventListener(
+  "pointerup",
+  (event) => {
+    if (!suppressedGameplayPointers.has(event.pointerId)) return;
+    pointerDown = false;
+    suppressedGameplayPointers.delete(event.pointerId);
+    runPendingPointerUiAction(event.pointerId);
+  },
+  { passive: true }
+);
+
 canvas.addEventListener("pointercancel", () => {
   pointerDown = false;
   suppressedGameplayPointers.clear();
+  pendingPointerUiActions.clear();
   activePointers.clear();
 });
 
@@ -2145,7 +2162,7 @@ function measureCanvas() {
   return canvasMetrics;
 }
 
-function handleCanvasUi(point, clickCount = 1) {
+function handleCanvasUi(point, clickCount = 1, event = null) {
   for (let index = menuButtons.length - 1; index >= 0; index -= 1) {
     const button = menuButtons[index];
     if (
@@ -2154,12 +2171,24 @@ function handleCanvasUi(point, clickCount = 1) {
       point.y >= button.y &&
       point.y <= button.y + button.h
     ) {
+      if (button.runOnPointerUp && event) {
+        pendingPointerUiActions.set(event.pointerId, button.action);
+        return true;
+      }
       button.action();
       return true;
     }
   }
 
   return Boolean(uiScreen);
+}
+
+function runPendingPointerUiAction(pointerId) {
+  const action = pendingPointerUiActions.get(pointerId);
+  if (!action) return false;
+  pendingPointerUiActions.delete(pointerId);
+  action();
+  return true;
 }
 
 function handleTouchPause(event, point) {
@@ -2326,6 +2355,7 @@ function getWaitingHintText() {
 function clearControls() {
   pointerDown = false;
   suppressedGameplayPointers.clear();
+  pendingPointerUiActions.clear();
   activePointers.clear();
   lastCenterTapAt = 0;
   localPointerMalletIndex = 0;
@@ -2874,10 +2904,12 @@ function drawSoundGateMenu(interactive) {
   drawRedButton(start.x, start.y, start.w, start.h, t("soundStartButton"), 25);
 
   if (interactive) {
-    addButton(start, () => {
+    addReleaseButton(start, () => {
       const action = pendingModeStartAction;
       pendingModeStartAction = null;
-      void armAudioSessionFromModeButton();
+      void armAudioSessionFromModeButton().then((ready) => {
+        if (ready) playFx("hit", 0.18);
+      });
       if (action) action();
     });
   }
@@ -3502,6 +3534,10 @@ function drawStatusPill(text) {
 
 function addButton(rect, action) {
   menuButtons.push({ ...rect, action });
+}
+
+function addReleaseButton(rect, action) {
+  menuButtons.push({ ...rect, action, runOnPointerUp: true });
 }
 
 async function copyInviteLink() {
