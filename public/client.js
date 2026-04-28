@@ -279,8 +279,10 @@ let puckSprite = null;
 let canvasMetrics = null;
 let currentCursor = "";
 const predictedMallets = new Map();
-const LOCAL_PREDICTION_WINDOW_MS = 900;
-const LOCAL_SAME_DEVICE_PREDICTION_WINDOW_MS = 2400;
+const LOCAL_PREDICTION_WINDOW_MS = 260;
+const LOCAL_SAME_DEVICE_PREDICTION_WINDOW_MS = 900;
+const LOCAL_UNACKED_PREDICTION_GRACE_MS = 320;
+const LOCAL_PREDICTION_RECONCILE_DISTANCE = 24;
 const LOCAL_PREDICTION_MAX_STEP = 1 / 240;
 const LOCAL_REHIT_SUPPRESSION_MS = 45;
 const LOCAL_BLOCK_INPUT_GRACE_MS = 58;
@@ -392,24 +394,30 @@ function recoverAudioOnInteraction() {
 els.onePuckButton.addEventListener("click", () => setPuckCount(1));
 els.twoPuckButton.addEventListener("click", () => setPuckCount(2));
 els.quickButton.addEventListener("click", () => {
-  stopOfflineGame();
-  send({ type: "quick", puckCount });
-  setStatus("searching");
+  runWithSoundGate(() => {
+    stopOfflineGame();
+    send({ type: "quick", puckCount });
+    setStatus("searching");
+  });
 });
 els.createButton.addEventListener("click", () => {
-  stopOfflineGame();
-  send({ type: "create", puckCount });
-  setStatus("waitingOpponent");
+  runWithSoundGate(() => {
+    stopOfflineGame();
+    send({ type: "create", puckCount });
+    setStatus("waitingOpponent");
+  });
 });
 els.botButton.addEventListener("click", () => {
-  startOfflineGame("bot", puckCount);
+  runWithSoundGate(() => startOfflineGame("bot", puckCount));
 });
 els.joinForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const code = els.roomInput.value.trim().toUpperCase();
   if (code) {
-    stopOfflineGame();
-    send({ type: "join", code });
+    runWithSoundGate(() => {
+      stopOfflineGame();
+      send({ type: "join", code });
+    });
   }
 });
 els.copyButton.addEventListener("click", async () => {
@@ -1644,14 +1652,7 @@ function applyPuckCorrection(nextState, ackInputSeq = 0) {
       localPredictedPucks.delete(puck.id);
       const distanceFromPrediction = Math.hypot(predicted.x - authoritative.x, predicted.y - authoritative.y);
       if (distanceFromPrediction >= 4) {
-        puckCorrections.set(puck.id, {
-          fromX: predicted.x,
-          fromY: predicted.y,
-          toX: authoritative.x,
-          toY: authoritative.y,
-          startedAt: now,
-          expiresAt: now + (distanceFromPrediction > 28 ? 44 : 80)
-        });
+        startPuckCorrection(puck.id, predicted.x, predicted.y, authoritative.x, authoritative.y, now);
         continue;
       }
     }
@@ -1662,32 +1663,52 @@ function applyPuckCorrection(nextState, ackInputSeq = 0) {
       puckCorrections.delete(puck.id);
       continue;
     }
-    puckCorrections.set(puck.id, {
-      fromX: puck.x,
-      fromY: puck.y,
-      toX: authoritative.x,
-      toY: authoritative.y,
-      startedAt: now,
-      expiresAt: now + (distance > 28 ? 44 : 80)
-    });
+    startPuckCorrection(puck.id, puck.x, puck.y, authoritative.x, authoritative.y, now);
   }
 }
 
 function shouldKeepLocalPuckPrediction(prediction, authoritative, ackInputSeq = 0) {
   if (!prediction) return false;
 
+  const now = performance.now();
+  const age = now - (prediction.startedAt || now);
+  const distance = Math.hypot((prediction.x || 0) - authoritative.x, (prediction.y || 0) - authoritative.y);
   const authoritativeHitSerial = authoritative.hitSerial || 0;
   if (authoritativeHitSerial && authoritativeHitSerial !== prediction.serverHitSerial) {
     if (isControlledMalletIndex(authoritative.lastMalletHitIndex)) {
       prediction.serverHitSerial = authoritativeHitSerial;
-      return true;
+      return distance <= LOCAL_PREDICTION_RECONCILE_DISTANCE && age <= LOCAL_PREDICTION_WINDOW_MS;
     }
     return false;
   }
 
-  if (prediction.inputSeq && !isInputSeqAcknowledged(ackInputSeq, prediction.inputSeq)) return true;
+  if (prediction.inputSeq && !isInputSeqAcknowledged(ackInputSeq, prediction.inputSeq)) {
+    return age <= LOCAL_UNACKED_PREDICTION_GRACE_MS;
+  }
 
-  return true;
+  if (distance > LOCAL_PREDICTION_RECONCILE_DISTANCE) return false;
+
+  return age <= LOCAL_PREDICTION_WINDOW_MS;
+}
+
+function startPuckCorrection(id, fromX, fromY, toX, toY, now = performance.now()) {
+  const distance = Math.hypot(fromX - toX, fromY - toY);
+  if (distance < 4) {
+    puckCorrections.delete(id);
+    return;
+  }
+  puckCorrections.set(id, {
+    fromX,
+    fromY,
+    toX,
+    toY,
+    startedAt: now,
+    expiresAt: now + correctionDurationForDistance(distance)
+  });
+}
+
+function correctionDurationForDistance(distance) {
+  return clamp(90 + distance * 1.8, 110, 220);
 }
 
 function isControlledMalletIndex(index) {
@@ -2514,6 +2535,7 @@ function displayPuck(puck, state) {
   if (prediction) {
     if (now >= prediction.expiresAt) {
       localPredictedPucks.delete(puck.id);
+      startPuckCorrection(puck.id, prediction.x, prediction.y, puck.x, puck.y, now);
     } else {
       const predicted = advanceLocalPuckPrediction(prediction, now);
       return {
