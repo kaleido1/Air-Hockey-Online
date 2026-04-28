@@ -3,6 +3,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import SAT from "sat";
 import {
   decodeRealtimePacket,
   encodeFxPacket,
@@ -11,6 +12,7 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
+const satScriptPath = path.join(__dirname, "node_modules", "sat", "SAT.js");
 
 const HOST = process.env.HOST || process.env.HOSTNAME || "127.0.0.1";
 const PORT = Number(process.env.PORT || 3100);
@@ -78,6 +80,22 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || HOST}`);
   let pathname = decodeURIComponent(url.pathname);
   if (pathname === "/") pathname = "/index.html";
+
+  if (pathname === "/vendor/sat.js") {
+    fs.readFile(satScriptPath, (err, data) => {
+      if (err) {
+        res.writeHead(404);
+        res.end("Not found");
+        return;
+      }
+      res.writeHead(200, {
+        "Content-Type": "text/javascript; charset=utf-8",
+        "Cache-Control": "public, max-age=31536000, immutable"
+      });
+      res.end(data);
+    });
+    return;
+  }
 
   if (pathname === "/runtime-config.js") {
     res.writeHead(200, {
@@ -1042,10 +1060,11 @@ function rescueStuckPuck(room, puck, dt) {
 
 function forceSeparatePuckFromMallet(room, puck, mallet) {
   const minDistance = TABLE.puckRadius + TABLE.malletRadius;
-  let dx = puck.x - mallet.x;
-  let dy = puck.y - mallet.y;
+  const contact = getSatCircleContact(mallet.x, mallet.y, TABLE.malletRadius, puck.x, puck.y, TABLE.puckRadius);
+  let dx = contact?.nx ?? puck.x - mallet.x;
+  let dy = contact?.ny ?? puck.y - mallet.y;
   let distance = Math.hypot(dx, dy);
-  if (distance >= minDistance) return;
+  if (!contact && distance >= minDistance) return;
   if (distance <= 0.001) {
     dx = puck.vx - mallet.vx;
     dy = puck.vy - mallet.vy;
@@ -1059,7 +1078,7 @@ function forceSeparatePuckFromMallet(room, puck, mallet) {
 
   const nx = dx / distance;
   const ny = dy / distance;
-  const overlap = minDistance - distance + CONTACT_SEPARATION + 0.85;
+  const overlap = (contact?.overlap ?? minDistance - distance) + CONTACT_SEPARATION + 0.85;
   puck.x += nx * overlap;
   puck.y += ny * overlap;
 
@@ -1124,6 +1143,14 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
   let dy = probeY - contactY;
   let distance = Math.hypot(dx, dy);
   let sweptHit = false;
+  const finalContact = getSatCircleContact(
+    mallet.x,
+    mallet.y,
+    TABLE.malletRadius,
+    puck.x,
+    puck.y,
+    TABLE.puckRadius
+  );
 
   if (relativeStartDistance > minDistance + 0.001) {
     const a = relativeDeltaX * relativeDeltaX + relativeDeltaY * relativeDeltaY;
@@ -1160,7 +1187,7 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
       dy = probeY - contactY;
       distance = Math.hypot(dx, dy);
     }
-  } else if (relativeStartDistance <= minDistance && distance < collisionDistance) {
+  } else if (relativeStartDistance <= minDistance && (finalContact || distance < collisionDistance)) {
     sweptHit = true;
     hitT = 0;
     probeX = puckStartX;
@@ -1172,7 +1199,13 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
     distance = Math.hypot(dx, dy);
   }
 
-  if (!sweptHit && distance >= collisionDistance) return false;
+  if (!sweptHit && !finalContact && distance >= collisionDistance) return false;
+
+  if (!sweptHit && finalContact) {
+    dx = finalContact.nx;
+    dy = finalContact.ny;
+    distance = 1;
+  }
 
   if (distance <= 0.001) {
     if (sweptHit) {
@@ -1197,7 +1230,9 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
     puck.x = contactX + nx * (minDistance + CONTACT_SEPARATION);
     puck.y = contactY + ny * (minDistance + CONTACT_SEPARATION);
   } else {
-    const separation = minDistance - distance + CONTACT_SEPARATION;
+    const separation = finalContact
+      ? finalContact.overlap + CONTACT_SEPARATION
+      : minDistance - distance + CONTACT_SEPARATION;
     if (separation > 0) {
       puck.x += nx * separation;
       puck.y += ny * separation;
@@ -1330,6 +1365,19 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
 
   room.updatedAt = Date.now();
   return intensity;
+}
+
+function getSatCircleContact(ax, ay, ar, bx, by, br) {
+  const a = new SAT.Circle(new SAT.Vector(ax, ay), ar);
+  const b = new SAT.Circle(new SAT.Vector(bx, by), br);
+  const response = new SAT.Response();
+  if (!SAT.testCircleCircle(a, b, response)) return null;
+  const length = Math.hypot(response.overlapN.x, response.overlapN.y) || 1;
+  return {
+    nx: response.overlapN.x / length,
+    ny: response.overlapN.y / length,
+    overlap: response.overlap
+  };
 }
 
 function getClientNetworkKey(req) {
@@ -2007,6 +2055,20 @@ export function runPhysicsSelfTest() {
     speed,
     puck,
     passed: speed >= 520 && puck.x > TABLE.width / 2 + TABLE.puckRadius
+  };
+}
+
+export function runSatCollisionSelfTest() {
+  const touching = getSatCircleContact(0, 0, 10, 15, 0, 10);
+  const separate = getSatCircleContact(0, 0, 10, 22, 0, 10);
+  return {
+    touching,
+    separate,
+    passed:
+      Boolean(touching) &&
+      Math.abs(touching.overlap - 5) < 0.001 &&
+      touching.nx > 0.99 &&
+      separate === null
   };
 }
 

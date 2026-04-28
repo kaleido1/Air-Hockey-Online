@@ -1054,6 +1054,14 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
     if (puck.localPredictedAt && now - puck.localPredictedAt < 22) continue;
     const visualPuck = puck;
     const finalDistance = Math.hypot(visualPuck.x - toX, visualPuck.y - toY);
+    const finalContact = getSatCircleContact(
+      toX,
+      toY,
+      malletRadius,
+      visualPuck.x,
+      visualPuck.y,
+      puckRadius
+    );
     const relativeStartX = visualPuck.x - fromX;
     const relativeStartY = visualPuck.y - fromY;
     const relativeStartDistance = Math.hypot(relativeStartX, relativeStartY);
@@ -1068,6 +1076,8 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
 
     if (relativeStartDistance <= minDistance && finalDistance <= collisionDistance && malletSpeed > 180) {
       hitT = 0;
+    } else if (finalContact && finalDistance <= collisionDistance && malletSpeed > 120) {
+      hitT = 1;
     } else if (movingTowardPuck && a > 0.000001) {
       const discriminant = b * b - 4 * a * c;
       if (discriminant >= 0) {
@@ -1082,8 +1092,8 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
     const contactMalletX = fromX + sweepX * hitT;
     const contactMalletY = fromY + sweepY * hitT;
 
-    let normalX = visualPuck.x - contactMalletX;
-    let normalY = visualPuck.y - contactMalletY;
+    let normalX = hitT === 1 && finalContact ? finalContact.nx : visualPuck.x - contactMalletX;
+    let normalY = hitT === 1 && finalContact ? finalContact.ny : visualPuck.y - contactMalletY;
     let normalLength = Math.hypot(normalX, normalY);
     if (normalLength <= 0.001) {
       normalX = sweepX || 1;
@@ -1126,6 +1136,21 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
     lastLocalHitFxAt = performance.now();
     playFx("hit", Math.min(1, strike / 900));
   }
+}
+
+function getSatCircleContact(ax, ay, ar, bx, by, br) {
+  const SATLib = globalThis.SAT;
+  if (!SATLib) return null;
+  const a = new SATLib.Circle(new SATLib.Vector(ax, ay), ar);
+  const b = new SATLib.Circle(new SATLib.Vector(bx, by), br);
+  const response = new SATLib.Response();
+  if (!SATLib.testCircleCircle(a, b, response)) return null;
+  const length = Math.hypot(response.overlapN.x, response.overlapN.y) || 1;
+  return {
+    nx: response.overlapN.x / length,
+    ny: response.overlapN.y / length,
+    overlap: response.overlap
+  };
 }
 
 function eventToTable(event) {
