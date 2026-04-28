@@ -98,6 +98,9 @@ const translations = {
     waitingOtherPlayerJoin: "等待另一名玩家加入",
     readyToStart: "准备开始",
     waitingJoin: "等待对手加入",
+    soundStartTitle: "开启声音",
+    soundStartHint: "点击后开始本次游戏并启用声音",
+    soundStartButton: "点击开启声音并开始",
     backMenu: "返回菜单",
     unavailable: "暂不可用",
     paused: "已暂停",
@@ -166,6 +169,9 @@ const translations = {
     waitingOtherPlayerJoin: "Waiting for another player",
     readyToStart: "Ready",
     waitingJoin: "Waiting for opponent",
+    soundStartTitle: "Enable Sound",
+    soundStartHint: "Tap once to start this session with sound",
+    soundStartButton: "Enable Sound and Start",
     backMenu: "Back to Menu",
     unavailable: "Unavailable",
     paused: "Paused",
@@ -232,6 +238,7 @@ let uiScreen = pendingRoomFromUrl ? "waiting" : "main";
 let previousUiScreen = null;
 let uiTransitionStartedAt = performance.now();
 let pendingStartMode = "bot";
+let pendingModeStartAction = null;
 let menuButtons = [];
 let soundEnabled = false;
 let audioSessionArmed = false;
@@ -1189,6 +1196,15 @@ function joinOnlineRoom() {
   showUi("waiting");
 }
 
+function runWithSoundGate(action) {
+  if (audioSessionArmed) {
+    action();
+    return;
+  }
+  pendingModeStartAction = action;
+  showUi("sound");
+}
+
 function isActivePlay() {
   return Boolean(
     !uiScreen &&
@@ -1423,6 +1439,7 @@ function drawUiScreen(screen, offsetY, alpha, interactive) {
   if (screen === "online") drawOnlineMenu(interactive);
   if (screen === "waiting") drawWaitingMenu(interactive);
   if (screen === "notice") drawNoticeMenu(interactive);
+  if (screen === "sound") drawSoundGateMenu(interactive);
 
   ctx.restore();
 }
@@ -1452,32 +1469,36 @@ function drawMainMenu(interactive) {
   const labels = [t("mainSingle"), t("mainLocal"), t("mainWireless"), t("mainOnline")];
   const actions = [
     () => {
-      void armAudioSessionFromModeButton();
-      clearRoomUrl();
-      pendingStartMode = "bot";
-      showUi("puck");
+      runWithSoundGate(() => {
+        clearRoomUrl();
+        pendingStartMode = "bot";
+        showUi("puck");
+      });
     },
     () => {
-      void armAudioSessionFromModeButton();
-      clearRoomUrl();
-      pendingStartMode = "local";
-      showUi("puck");
+      runWithSoundGate(() => {
+        clearRoomUrl();
+        pendingStartMode = "local";
+        showUi("puck");
+      });
     },
     () => {
-      void armAudioSessionFromModeButton();
-      if (roomCode) {
-        send({ type: "leaveToMenu" });
-        clearRoom();
-      }
-      clearRoomUrl();
-      pendingStartMode = "lan";
-      showUi("puck");
+      runWithSoundGate(() => {
+        if (roomCode) {
+          send({ type: "leaveToMenu" });
+          clearRoom();
+        }
+        clearRoomUrl();
+        pendingStartMode = "lan";
+        showUi("puck");
+      });
     },
     () => {
-      void armAudioSessionFromModeButton();
-      if (returnToActiveOnlineRoom()) return;
-      pendingStartMode = "online";
-      showUi("online");
+      runWithSoundGate(() => {
+        if (returnToActiveOnlineRoom()) return;
+        pendingStartMode = "online";
+        showUi("online");
+      });
     },
   ];
 
@@ -1511,6 +1532,39 @@ function drawLanguageButton(interactive) {
   ctx.fillText(t("languageButton"), button.x + button.w / 2, button.y + button.h / 2 + 1);
   ctx.restore();
   if (interactive) addButton(button, toggleLanguage);
+}
+
+function drawSoundGateMenu(interactive) {
+  const x = 64;
+  const y = 354;
+  const w = 462;
+  const h = 264;
+  drawBluePanel(x, y, w, h, 24);
+
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#ffffff";
+  ctx.shadowColor = "rgba(0,0,0,0.42)";
+  ctx.shadowBlur = 3;
+  ctx.shadowOffsetY = 2;
+  ctx.font = "900 42px Arial, sans-serif";
+  ctx.fillText(t("soundStartTitle"), x + w / 2, y + 62);
+  ctx.font = "700 22px Arial, sans-serif";
+  ctx.fillText(t("soundStartHint"), x + w / 2, y + 112);
+  ctx.restore();
+
+  const start = { x: x + 26, y: y + 156, w: w - 52, h: 64 };
+  drawRedButton(start.x, start.y, start.w, start.h, t("soundStartButton"), 25);
+
+  if (interactive) {
+    addButton(start, () => {
+      const action = pendingModeStartAction;
+      pendingModeStartAction = null;
+      void armAudioSessionFromModeButton();
+      if (action) action();
+    });
+  }
 }
 
 function drawPuckMenu(interactive) {
