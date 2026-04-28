@@ -275,15 +275,13 @@ const LOCAL_CONTACT_SEPARATION = 0.12;
 const LOCAL_CONTACT_SLOP = 1.4;
 const LOCAL_BLOCK_RELEASE_SPEED = 180;
 const ENABLE_LOCAL_PUCK_PREDICTION = true;
-const INPUT_SWEEP_STEP_PIXELS = 1.5;
-const MAX_INPUT_SWEEP_STEPS = 144;
 const puckCorrections = new Map();
 const localPredictedPucks = new Map();
 let nextInputSeq = 1;
 let lastAckInputSeq = 0;
 let lastLocalHitFxAt = 0;
 let lastServerTickExtended = null;
-let interpolationDelayMs = 16;
+let interpolationDelayMs = 10;
 
 applyLanguage();
 startRefreshRateSampling();
@@ -901,7 +899,7 @@ function clearRoom() {
   nextInputSeq = 1;
   lastAckInputSeq = 0;
   lastServerTickExtended = null;
-  interpolationDelayMs = 16;
+  interpolationDelayMs = 10;
   els.roomCode.textContent = "-";
   els.roomPill.textContent = t("offline");
   els.youLabel.textContent = t("you");
@@ -1054,17 +1052,7 @@ function applySegmentedLocalStrikePrediction(index, fromX, fromY, toX, toY, prev
 
   const inputDt = clamp((now - previousInputAt) / 1000, 1 / 240, 1 / 24);
   const malletSpeed = distance / inputDt;
-  const steps = clamp(Math.ceil(distance / INPUT_SWEEP_STEP_PIXELS), 1, MAX_INPUT_SWEEP_STEPS);
-  let startX = fromX;
-  let startY = fromY;
-
-  for (let step = 1; step <= steps; step += 1) {
-    const endX = lerp(fromX, toX, step / steps);
-    const endY = lerp(fromY, toY, step / steps);
-    applyLocalStrikePrediction(index, startX, startY, endX, endY, now, malletSpeed, inputSeq);
-    startX = endX;
-    startY = endY;
-  }
+  applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSpeed, inputSeq);
 }
 
 function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSpeedOverride = null, inputSeq = 0) {
@@ -1499,8 +1487,8 @@ function rememberStateSnapshot(message) {
     const previous = stateSnapshots[stateSnapshots.length - 2];
     const latest = stateSnapshots[stateSnapshots.length - 1];
     const spacingMs = latest.serverTime - previous.serverTime;
-    const targetDelay = clamp(spacingMs * 1.35, 14, 22);
-    interpolationDelayMs = lerp(interpolationDelayMs, targetDelay, 0.35);
+    const targetDelay = clamp(spacingMs * 0.85, 6, 14);
+    interpolationDelayMs = lerp(interpolationDelayMs, targetDelay, 0.45);
   }
 }
 

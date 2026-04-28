@@ -52,9 +52,8 @@ const EDGE_BLOCK_RESPONSE_SPEED = 48;
 const STRONG_STRIKE_MIN_SPEED = 180;
 const STRIKE_ESCAPE_TRANSFER = 0.42;
 const PUCK_SUBSTEPS = 18;
-const INPUT_SWEEP_STEP_PIXELS = 1.5;
-const MAX_INPUT_SWEEP_STEPS = 144;
-const IMMEDIATE_HIT_STATE_GAP_MS = 10;
+const IMMEDIATE_HIT_STATE_GAP_MS = 4;
+const INPUT_STATE_GAP_MS = 8;
 const MALLET_RELEASE_LOCK_MS = 72;
 const FRICTION_PER_SECOND = 0.991;
 const STUCK_SPEED = 95;
@@ -574,6 +573,7 @@ function makeRoom(options = {}) {
     phaseStartedAt: Date.now(),
     lastSnapshotAt: 0,
     lastHitStateAt: 0,
+    lastInputStateAt: 0,
     lastFxAt: new Map(),
     botBrain: null,
     createdAt: Date.now(),
@@ -816,36 +816,26 @@ function updateInput(client, message) {
 function applyDirectInputSweep(room, mallet, malletIndex, targetX, targetY, inputDt, now, baseVx, baseVy) {
   const startX = mallet.x;
   const startY = mallet.y;
-  const totalDx = targetX - startX;
-  const totalDy = targetY - startY;
-  const distance = Math.hypot(totalDx, totalDy);
-  const steps = clamp(Math.ceil(distance / INPUT_SWEEP_STEP_PIXELS), 1, MAX_INPUT_SWEEP_STEPS);
-  const stepDt = inputDt / steps;
-  const startedAt = now - inputDt * 1000;
-  let anyHit = false;
+  mallet.sweepFromX = startX;
+  mallet.sweepFromY = startY;
+  mallet.sweepStartedAt = now - inputDt * 1000;
+  mallet.hasPendingSweep = true;
+  mallet.x = targetX;
+  mallet.y = targetY;
+  mallet.vx = baseVx;
+  mallet.vy = baseVy;
 
-  for (let step = 1; step <= steps; step += 1) {
-    const previousX = mallet.x;
-    const previousY = mallet.y;
-    mallet.sweepFromX = previousX;
-    mallet.sweepFromY = previousY;
-    mallet.sweepStartedAt = startedAt + (step - 1) * stepDt * 1000;
-    mallet.hasPendingSweep = true;
-    mallet.x = lerp(startX, targetX, step / steps);
-    mallet.y = lerp(startY, targetY, step / steps);
-    mallet.vx = baseVx;
-    mallet.vy = baseVy;
-    anyHit = resolveInputHits(room, mallet, malletIndex, stepDt, false) || anyHit;
+  const anyHit = resolveInputHits(room, mallet, malletIndex, inputDt, false);
 
-    for (const puck of room.state.pucks) {
-      forceSeparatePuckFromMallet(room, puck, mallet, malletIndex);
-      collidePuckWithWalls(room, puck);
-      capPuckSpeed(puck);
-      syncPuckHistory(puck);
-    }
+  for (const puck of room.state.pucks) {
+    forceSeparatePuckFromMallet(room, puck, mallet, malletIndex);
+    collidePuckWithWalls(room, puck);
+    capPuckSpeed(puck);
+    syncPuckHistory(puck);
   }
 
   if (anyHit) sendImmediateHitState(room, now);
+  sendInputState(room, now);
 }
 
 function tickRooms() {
@@ -1879,6 +1869,12 @@ function sendRoomState(room, now = Date.now(), force = false) {
 function sendImmediateHitState(room, now = Date.now()) {
   if (now - (room.lastHitStateAt || 0) < IMMEDIATE_HIT_STATE_GAP_MS) return;
   room.lastHitStateAt = now;
+  sendRoomState(room, now, true);
+}
+
+function sendInputState(room, now = Date.now()) {
+  if (now - (room.lastInputStateAt || 0) < INPUT_STATE_GAP_MS) return;
+  room.lastInputStateAt = now;
   sendRoomState(room, now, true);
 }
 
