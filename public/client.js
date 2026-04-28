@@ -1746,11 +1746,13 @@ function drawPauseOverlay() {
     soundEnabled = !soundEnabled;
     persistSoundEnabled();
     if (!soundEnabled) {
+      applyAudioSessionType("auto");
       stopAudioKeepAlive();
       if (audio) audio.suspend();
     }
     if (soundEnabled) {
       audioSessionArmed = true;
+      applyAudioSessionType("playback");
       void activateAudioFromGesture();
     }
   });
@@ -2542,6 +2544,7 @@ function ensureAudioContext() {
 function activateAudioFromGesture() {
   if (!soundEnabled) return Promise.resolve(false);
   if (audioNeedsFreshContext) resetAudioContext();
+  applyAudioSessionType("playback");
   const context = ensureAudioContext();
   if (!context) return Promise.resolve(false);
   const needsReactivate = audioNeedsTouchReactivate;
@@ -2573,6 +2576,23 @@ function resetAudioContext() {
   audioUnlockedByGesture = false;
   if (oldAudio && typeof oldAudio.close === "function") {
     oldAudio.close().catch(() => {});
+  }
+}
+
+function applyAudioSessionType(type) {
+  try {
+    if (navigator.audioSession && navigator.audioSession.type !== type) {
+      navigator.audioSession.type = type;
+    }
+  } catch {
+    // Ignore unsupported or rejected Audio Session API writes.
+  }
+  try {
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.playbackState = type === "playback" ? "playing" : "none";
+    }
+  } catch {
+    // Ignore partial media session implementations.
   }
 }
 
@@ -2674,6 +2694,7 @@ function primeAudioContext() {
 
 function recoverAudioContext() {
   if (!soundEnabled || !audio) return Promise.resolve(false);
+  applyAudioSessionType("playback");
   if (audio.state === "running") return Promise.resolve(finishAudioActivation());
   if (audio.state === "interrupted") {
     return audio
