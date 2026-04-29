@@ -2,6 +2,12 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md)
 
+<p align="center">
+  <a href="https://discord.gg/W6eQPazqe">
+    <img src="https://img.shields.io/badge/Discord-%E5%8A%A0%E5%85%A5%E7%A4%BE%E7%BE%A4-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="加入 Air Hockey Online Discord 服务器">
+  </a>
+</p>
+
 Air Hockey Online 是一个面向浏览器的街机风气垫球游戏，重点强调手机、平板、桌面多端可玩，以及接近竞技游戏手感的快速对战体验。项目支持单人练习、本机双人、局域网无线双人，以及在线双人联机。
 
 立即体验：

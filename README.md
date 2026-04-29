@@ -2,6 +2,12 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md)
 
+<p align="center">
+  <a href="https://discord.gg/W6eQPazqe">
+    <img src="https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join the Air Hockey Online Discord server">
+  </a>
+</p>
+
 Air Hockey Online is a browser-based arcade air hockey game built for fast, competitive play across phones, tablets, and desktop browsers. It supports single-player practice, same-device two-player play, wireless LAN play, and full online multiplayer.
 
 Play now:
