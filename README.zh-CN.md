@@ -3,7 +3,7 @@
 [English](./README.md) | [中文](./README.zh-CN.md)
 
 <p align="center">
-  <a href="https://discord.gg/W6eQPazqe">
+  <a href="https://discord.gg/PVx9PXAZyb">
     <img src="https://img.shields.io/badge/Discord-%E5%8A%A0%E5%85%A5%E7%A4%BE%E7%BE%A4-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="加入 Air Hockey Online Discord 服务器">
   </a>
 </p>
