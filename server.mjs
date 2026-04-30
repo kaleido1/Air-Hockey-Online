@@ -40,14 +40,12 @@ const TABLE = {
 const PHYSICS_HZ = readTickHz("AIR_HOCKEY_PHYSICS_HZ", 360, 240, 480);
 const SNAPSHOT_HZ = readTickHz("AIR_HOCKEY_SNAPSHOT_HZ", 180, 120, Math.min(240, PHYSICS_HZ));
 const DT = 1 / PHYSICS_HZ;
-const MALLET_MAX_SPEED = 3600;
 const HUMAN_MALLET_BASE_SPEED = 4200;
 const HUMAN_MALLET_INPUT_SPEED_SCALE = 1.15;
-const HUMAN_MALLET_MAX_SPEED = 9000;
 const HUMAN_MALLET_SPEED_HOLD_MS = 120;
 const BOT_MIN_SPEED = 1700;
 const BOT_MAX_SPEED = 3400;
-const PUCK_MAX_SPEED = 2550;
+const PUCK_REFERENCE_SPEED = 2550;
 const PUCK_MIN_SERVE_SPEED = 520;
 const PUCK_MIN_LIVE_SPEED = 120;
 const WALL_RESTITUTION = 0.91;
@@ -893,7 +891,6 @@ function markMatterMalletContact(room, { malletIndex, malletBody, puck, puckBody
       x: (puckVx + nx * carry) / 60,
       y: (puckVy + ny * carry) / 60
     });
-    capMatterPuckBodySpeed(puckBody);
   }
 
   puck.lastMalletHitIndex = malletIndex;
@@ -949,17 +946,6 @@ function matterMalletPuckCollision(bodyA, bodyB, pucksById) {
 function matterMalletIndex(body) {
   const match = /^mallet-(\d+)$/.exec(body?.label || "");
   return match ? Number(match[1]) : null;
-}
-
-function capMatterPuckBodySpeed(body) {
-  const vx = body.velocity.x * 60;
-  const vy = body.velocity.y * 60;
-  const speed = Math.hypot(vx, vy);
-  if (speed <= PUCK_MAX_SPEED || speed <= 0.001) return;
-  Matter.Body.setVelocity(body, {
-    x: ((vx / speed) * PUCK_MAX_SPEED) / 60,
-    y: ((vy / speed) * PUCK_MAX_SPEED) / 60
-  });
 }
 
 function startRoom(room) {
@@ -1159,19 +1145,11 @@ function updateInput(client, message) {
   const requestedSpeed = normalizedHumanInputSpeed(message, previousX, previousY, constrained.x, constrained.y, inputDt);
   mallet.inputSpeedLimit = requestedSpeed;
   mallet.inputSpeedUntil = now + HUMAN_MALLET_SPEED_HOLD_MS;
-  const limited = limitPointStep(
-    previousX,
-    previousY,
-    constrained.x,
-    constrained.y,
-    requestedSpeed * inputDt
-  );
+  const limited = constrained;
   const dx = limited.x - previousX;
   const dy = limited.y - previousY;
-  const speed = Math.hypot(dx, dy) / inputDt;
-  const velocityScale = speed > requestedSpeed ? requestedSpeed / speed : 1;
-  const baseVx = (dx / inputDt) * velocityScale;
-  const baseVy = (dy / inputDt) * velocityScale;
+  const baseVx = dx / inputDt;
+  const baseVy = dy / inputDt;
   if (!mallet.hasPendingSweep) {
     mallet.sweepFromX = previousX;
     mallet.sweepFromY = previousY;
@@ -1197,9 +1175,9 @@ function updateInput(client, message) {
 
 function normalizedHumanInputSpeed(message, fromX, fromY, targetX, targetY, dt) {
   const measuredSpeed = Math.hypot(targetX - fromX, targetY - fromY) / Math.max(dt, 1 / 300);
-  const clientSpeed = clamp(Number(message.inputSpeed) || 0, 0, HUMAN_MALLET_MAX_SPEED);
+  const clientSpeed = Math.max(0, Number(message.inputSpeed) || 0);
   const requested = Math.max(HUMAN_MALLET_BASE_SPEED, measuredSpeed, clientSpeed * HUMAN_MALLET_INPUT_SPEED_SCALE);
-  return clamp(requested, HUMAN_MALLET_BASE_SPEED, HUMAN_MALLET_MAX_SPEED);
+  return requested;
 }
 
 function applyDirectInputSweep(room, mallet, malletIndex, targetX, targetY, inputDt, now, baseVx, baseVy) {
@@ -1226,7 +1204,7 @@ function applyDirectInputSweep(room, mallet, malletIndex, targetX, targetY, inpu
   for (const puck of room.state.pucks) {
     forceSeparatePuckFromAllMallets(room, puck);
     collidePuckWithWalls(room, puck);
-    capPuckSpeed(puck);
+    stopVerySlowPuck(puck);
     syncMatterPuckBody(room, puck);
   }
 
@@ -1408,13 +1386,12 @@ function moveMallets(room, dt) {
     const dx = target.x - mallet.x;
     const dy = target.y - mallet.y;
     const distance = Math.hypot(dx, dy);
-    const speedLimit = mallet.maxSpeed || activeHumanMalletSpeedLimit(mallet);
-    const maxMove = speedLimit * dt;
+    const maxMove = mallet.maxSpeed ? mallet.maxSpeed * dt : Infinity;
     mallet.sweepFromX = previousX;
     mallet.sweepFromY = previousY;
 
     const desired =
-      distance > maxMove && distance > 0.001
+      mallet.maxSpeed && distance > maxMove && distance > 0.001
         ? {
             x: mallet.x + (dx / distance) * maxMove,
             y: mallet.y + (dy / distance) * maxMove
@@ -1453,13 +1430,6 @@ function moveMallets(room, dt) {
   }
 }
 
-function activeHumanMalletSpeedLimit(mallet, now = Date.now()) {
-  if (mallet?.inputSpeedUntil && now <= mallet.inputSpeedUntil) {
-    return clamp(Number(mallet.inputSpeedLimit) || HUMAN_MALLET_BASE_SPEED, HUMAN_MALLET_BASE_SPEED, HUMAN_MALLET_MAX_SPEED);
-  }
-  return HUMAN_MALLET_BASE_SPEED;
-}
-
 function resolveInputHits(room, mallet, malletIndex, dt, emitState = true) {
   let anyHit = false;
   for (const puck of room.state.pucks) {
@@ -1468,7 +1438,7 @@ function resolveInputHits(room, mallet, malletIndex, dt, emitState = true) {
     anyHit = true;
     forceSeparatePuckFromAllMallets(room, puck);
     collidePuckWithWalls(room, puck);
-    capPuckSpeed(puck);
+    stopVerySlowPuck(puck);
     syncMatterPuckBody(room, puck);
     emitFx(room, "hit", false, hit);
   }
@@ -1481,7 +1451,7 @@ function settlePuckMalletOverlaps(room) {
   for (const puck of room.state.pucks) {
     forceSeparatePuckFromAllMallets(room, puck);
     collidePuckWithWalls(room, puck);
-    capPuckSpeed(puck);
+    stopVerySlowPuck(puck);
     syncMatterPuckBody(room, puck);
   }
 }
@@ -1497,7 +1467,7 @@ function stepPucks(room, dt) {
     puck.prevX = puck.x;
     puck.prevY = puck.y;
     applyPuckInertia(puck, PUCK_INERTIA, dt);
-    capPuckSpeed(puck);
+    stopVerySlowPuck(puck);
     syncMatterPuckBody(room, puck);
   }
 
@@ -1508,7 +1478,7 @@ function stepPucks(room, dt) {
 
   for (const puck of state.pucks) {
     syncPuckFromMatterBody(room, puck);
-    capPuckSpeed(puck);
+    stopVerySlowPuck(puck);
     syncMatterPuckBody(room, puck);
 
     const scorer = detectGoalCrossing(TABLE, puck) ?? detectGoal(puck);
@@ -1519,9 +1489,9 @@ function stepPucks(room, dt) {
     }
 
     forceSeparatePuckFromAllMallets(room, puck);
-    capPuckSpeed(puck);
+    stopVerySlowPuck(puck);
     rescueStuckPuck(room, puck, dt);
-    capPuckSpeed(puck);
+    stopVerySlowPuck(puck);
     syncMatterPuckBody(room, puck);
     activePucks.push(puck);
   }
@@ -1538,12 +1508,12 @@ function collidePuckWithWalls(room, puck) {
   let intensity = 0;
 
   if (puck.x < r) {
-    intensity = Math.max(intensity, Math.abs(puck.vx) / PUCK_MAX_SPEED);
+    intensity = Math.max(intensity, Math.abs(puck.vx) / PUCK_REFERENCE_SPEED);
     puck.x = r;
     puck.vx = Math.abs(puck.vx) * WALL_RESTITUTION;
     bounced = true;
   } else if (puck.x > TABLE.width - r) {
-    intensity = Math.max(intensity, Math.abs(puck.vx) / PUCK_MAX_SPEED);
+    intensity = Math.max(intensity, Math.abs(puck.vx) / PUCK_REFERENCE_SPEED);
     puck.x = TABLE.width - r;
     puck.vx = -Math.abs(puck.vx) * WALL_RESTITUTION;
     bounced = true;
@@ -1552,12 +1522,12 @@ function collidePuckWithWalls(room, puck) {
   const insideGoal = puck.x > goalLeft && puck.x < goalRight;
 
   if (puck.y < r && !insideGoal) {
-    intensity = Math.max(intensity, Math.abs(puck.vy) / PUCK_MAX_SPEED);
+    intensity = Math.max(intensity, Math.abs(puck.vy) / PUCK_REFERENCE_SPEED);
     puck.y = r;
     puck.vy = Math.abs(puck.vy) * WALL_RESTITUTION;
     bounced = true;
   } else if (puck.y > TABLE.height - r && !insideGoal) {
-    intensity = Math.max(intensity, Math.abs(puck.vy) / PUCK_MAX_SPEED);
+    intensity = Math.max(intensity, Math.abs(puck.vy) / PUCK_REFERENCE_SPEED);
     puck.y = TABLE.height - r;
     puck.vy = -Math.abs(puck.vy) * WALL_RESTITUTION;
     bounced = true;
@@ -1622,7 +1592,7 @@ function forceSeparatePuckFromMallet(room, puck, mallet, malletIndex = null) {
     const correction = escapeSpeed - relativeNormalSpeed;
     puck.vx += nx * correction;
     puck.vy += ny * correction;
-    capPuckSpeed(puck);
+    stopVerySlowPuck(puck);
   }
 }
 
@@ -1675,7 +1645,7 @@ function maintainMalletLeavingState(room, puck, mallet, release) {
     const correction = escapeSpeed - normalSpeed;
     puck.vx += release.nx * correction;
     puck.vy += release.ny * correction;
-    capPuckSpeed(puck);
+    stopVerySlowPuck(puck);
   }
 
   puck.prevX = puck.x;
@@ -1904,7 +1874,7 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
     puck.vy += tangentY * tangentCarry;
   }
 
-  capPuckSpeed(puck);
+  stopVerySlowPuck(puck);
 
   if (sweptHit && hitT < 1) {
     const remaining = dt * (1 - hitT);
@@ -2015,8 +1985,8 @@ function collidePucks(a, b) {
   a.vy -= impulse * ny;
   b.vx += impulse * nx;
   b.vy += impulse * ny;
-  capPuckSpeed(a);
-  capPuckSpeed(b);
+  stopVerySlowPuck(a);
+  stopVerySlowPuck(b);
   return intensity;
 }
 
@@ -2832,7 +2802,7 @@ export function runRepeatedContactReleaseSelfTest() {
       Boolean(hit) &&
       !secondHit &&
       puck.vx >= PUCK_MIN_LIVE_SPEED &&
-      speedAfterSecond <= Math.min(PUCK_MAX_SPEED, speedAfterFirst + 1) &&
+      speedAfterSecond <= speedAfterFirst + 1 &&
       distance >= targetDistance - 0.001
   };
 }
@@ -2929,7 +2899,7 @@ export function runDirectInputNoSwallowSelfTest() {
       malletStayedOnImpactSide &&
       puck.lastMalletHitIndex === 0 &&
       puck.hitSerial > 0 &&
-      speed <= PUCK_MAX_SPEED + 0.001 &&
+      speed >= PUCK_MIN_LIVE_SPEED &&
       puck.x !== publicMallet.x
   };
 }
@@ -3018,8 +2988,7 @@ export function runDynamicMalletMatterSelfTest() {
         distance >= minDistance - 0.02 &&
         puck.lastMalletHitIndex === malletIndex &&
         puck.hitSerial > 0 &&
-        speed >= PUCK_MIN_LIVE_SPEED &&
-        speed <= PUCK_MAX_SPEED + 0.001
+        speed >= PUCK_MIN_LIVE_SPEED
     };
   });
 
@@ -3236,14 +3205,11 @@ export function runInputSpeedBudgetSelfTest() {
     legacyRequestedSpeed,
     fastMove,
     baseMovePerTick: HUMAN_MALLET_BASE_SPEED / PHYSICS_HZ,
-    maxMovePerTick: HUMAN_MALLET_MAX_SPEED / PHYSICS_HZ,
     passed:
       requestedSpeed > HUMAN_MALLET_BASE_SPEED &&
-      requestedSpeed <= HUMAN_MALLET_MAX_SPEED &&
       legacyRequestedSpeed >= HUMAN_MALLET_BASE_SPEED &&
-      legacyRequestedSpeed <= HUMAN_MALLET_MAX_SPEED &&
       fastMove > HUMAN_MALLET_BASE_SPEED / PHYSICS_HZ &&
-      fastMove <= HUMAN_MALLET_MAX_SPEED / PHYSICS_HZ + 0.1
+      fastMove >= 259.9
   };
 }
 
@@ -3389,12 +3355,9 @@ function constrainMalletAwayFromPucks(index, x, y, pucks) {
   return point;
 }
 
-function capPuckSpeed(puck) {
+function stopVerySlowPuck(puck) {
   const speed = Math.hypot(puck.vx, puck.vy);
-  if (speed > PUCK_MAX_SPEED) {
-    puck.vx = (puck.vx / speed) * PUCK_MAX_SPEED;
-    puck.vy = (puck.vy / speed) * PUCK_MAX_SPEED;
-  } else if (speed > 0 && speed < PUCK_MIN_LIVE_SPEED * 0.3) {
+  if (speed > 0 && speed < PUCK_MIN_LIVE_SPEED * 0.3) {
     // Let very slow pucks come to rest naturally
     puck.vx = 0;
     puck.vy = 0;

@@ -5,7 +5,6 @@ import {
   detectGoalCrossing,
   getMalletStart as getMalletStartCore,
   getServeAnchorY as getServeAnchorYCore,
-  limitPointStep,
   resolveSweptPuckMalletContact,
   separatePuckFromMallet
 } from "./offline-physics.js";
@@ -288,7 +287,6 @@ let serverTickHz = Number(window.AIR_HOCKEY_PHYSICS_HZ) || 360;
 let serverSnapshotHz = Number(window.AIR_HOCKEY_SNAPSHOT_HZ) || 180;
 const LOCAL_HUMAN_MALLET_BASE_SPEED = 4200;
 const LOCAL_HUMAN_MALLET_INPUT_SPEED_SCALE = 1.15;
-const LOCAL_HUMAN_MALLET_MAX_SPEED = 9000;
 const LOCAL_HUMAN_MALLET_SPEED_HOLD_MS = 120;
 const LOCAL_REHIT_SUPPRESSION_MS = 68;
 const LOCAL_CONTACT_SEPARATION = 0.2;
@@ -299,7 +297,6 @@ const LOCAL_WALL_RESTITUTION = 0.91;
 const LOCAL_FRICTION_PER_SECOND = 0.985;
 const LOCAL_LINEAR_FRICTION = 18;
 const LOCAL_PUCK_STOP_SPEED = 16;
-const LOCAL_PUCK_MAX_SPEED = 2550;
 const LOCAL_STRONG_SWEEP_TANGENTIAL_TRANSFER = 0.08;
 const LOCAL_STRONG_SWEEP_TANGENTIAL_MAX = 180;
 const OFFLINE_PHYSICS_HZ = 240;
@@ -1245,13 +1242,7 @@ function updateOfflineMalletInput(index, point, previousInputAt, now) {
   const speedLimit = localInputSpeedLimit(inputSpeed, fromX, fromY, constrained.x, constrained.y, inputDt);
   mallet.inputSpeedLimit = speedLimit;
   mallet.inputSpeedUntil = now + LOCAL_HUMAN_MALLET_SPEED_HOLD_MS;
-  const limited = limitPointStep(
-    fromX,
-    fromY,
-    constrained.x,
-    constrained.y,
-    speedLimit * inputDt
-  );
+  const limited = constrained;
   mallet.targetX = constrained.x;
   mallet.targetY = constrained.y;
   mallet.x = limited.x;
@@ -1336,13 +1327,12 @@ function resolveOfflineMalletSweep(index, fromX, fromY, toX, toY, inputDt, now) 
       exitY = blendedY / blendedLength;
     }
 
-    const strike = Math.min(LOCAL_PUCK_MAX_SPEED, Math.max(staticKick, 170 + malletSpeed * 0.105));
+    const strike = Math.max(staticKick, 170 + malletSpeed * 0.105);
     puck.x = contactMalletX + exitX * (minDistance + LOCAL_HARD_CONTACT_SEPARATION);
     puck.y = contactMalletY + exitY * (minDistance + LOCAL_HARD_CONTACT_SEPARATION);
     puck.vx = exitX * strike + moveX * sweepKick + sweepX * 8;
     puck.vy = exitY * strike + moveY * sweepKick + sweepY * 8;
     addLocalTangentialSweep(puck, normalX, normalY, moveX, moveY, malletSpeed);
-    capLocalPuckSpeed(puck);
     puck.lastMalletHitIndex = index;
     puck.lastMalletHitAt = now;
     puck.hitSerial = ((puck.hitSerial || 0) + 1) & 0xff;
@@ -1417,14 +1407,7 @@ function moveOfflineControlledMallets(dt, now) {
     if (!Number.isFinite(mallet?.targetX) || !Number.isFinite(mallet?.targetY)) continue;
     const fromX = mallet.x;
     const fromY = mallet.y;
-    const speedLimit = localActiveMalletSpeedLimit(mallet, now);
-    const limited = limitPointStep(
-      fromX,
-      fromY,
-      mallet.targetX,
-      mallet.targetY,
-      speedLimit * dt
-    );
+    const limited = { x: mallet.targetX, y: mallet.targetY };
     if (Math.hypot(limited.x - fromX, limited.y - fromY) <= 0.001) continue;
 
     mallet.x = limited.x;
@@ -1456,7 +1439,7 @@ function measureInputSpeed(index, point, now, fallbackDt) {
   const dt = previous ? clamp((now - previous.at) / 1000, 1 / 300, 1 / 24) : fallbackDt;
   const speed = previous ? Math.hypot(point.x - previous.x, point.y - previous.y) / dt : 0;
   lastInputPointByPlayer[index] = { x: point.x, y: point.y, at: now };
-  return clamp(speed, 0, LOCAL_HUMAN_MALLET_MAX_SPEED);
+  return Math.max(0, speed);
 }
 
 function localInputSpeedLimit(inputSpeed, fromX, fromY, targetX, targetY, dt) {
@@ -1466,18 +1449,7 @@ function localInputSpeedLimit(inputSpeed, fromX, fromY, targetX, targetY, dt) {
     measuredSpeed,
     inputSpeed * LOCAL_HUMAN_MALLET_INPUT_SPEED_SCALE
   );
-  return clamp(requested, LOCAL_HUMAN_MALLET_BASE_SPEED, LOCAL_HUMAN_MALLET_MAX_SPEED);
-}
-
-function localActiveMalletSpeedLimit(mallet, now = performance.now()) {
-  if (mallet?.inputSpeedUntil && now <= mallet.inputSpeedUntil) {
-    return clamp(
-      Number(mallet.inputSpeedLimit) || LOCAL_HUMAN_MALLET_BASE_SPEED,
-      LOCAL_HUMAN_MALLET_BASE_SPEED,
-      LOCAL_HUMAN_MALLET_MAX_SPEED
-    );
-  }
-  return LOCAL_HUMAN_MALLET_BASE_SPEED;
+  return requested;
 }
 
 function stepOfflineMatterWorld(dt) {
@@ -1488,7 +1460,6 @@ function stepOfflineMatterWorld(dt) {
     puck.prevX = puck.x;
     puck.prevY = puck.y;
     applyPuckInertia(puck, physicsConfig, dt);
-    capLocalPuckSpeed(puck);
     syncOfflinePuckBody(puck);
   }
 
@@ -1502,7 +1473,6 @@ function stepOfflineMatterWorld(dt) {
     puck.y = body.position.y;
     puck.vx = body.velocity.x * 60;
     puck.vy = body.velocity.y * 60;
-    capLocalPuckSpeed(puck);
     resolveOfflinePuckMalletContacts(puck, dt);
     const scorer = detectOfflineGoal(puck);
     if (scorer !== null) scored.push({ puck, scorer });
@@ -1534,7 +1504,6 @@ function resolveOfflinePuckMalletContacts(puck, dt) {
     puck.y = result.y;
     puck.vx = result.vx;
     puck.vy = result.vy;
-    capLocalPuckSpeed(puck);
     syncOfflinePuckBody(puck);
     playFx("hit", 0.34);
   }
@@ -1816,14 +1785,6 @@ function clearRoom() {
 
 function applyPuckCorrection() {
   puckCorrections.clear();
-}
-
-function capLocalPuckSpeed(puck) {
-  const speed = Math.hypot(puck.vx || 0, puck.vy || 0);
-  if (speed <= LOCAL_PUCK_MAX_SPEED || speed <= 0.001) return;
-  const scale = LOCAL_PUCK_MAX_SPEED / speed;
-  puck.vx *= scale;
-  puck.vy *= scale;
 }
 
 function sendPointer(event, force, overridePlayerIndex = null) {

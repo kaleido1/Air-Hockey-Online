@@ -31,7 +31,6 @@ const CONFIG = {
   restitution: 0.72,
   stopSpeed: 16
 };
-const PUCK_MAX_SPEED = 2550;
 const PRE_OFFENSE_PUCK_MAX_SPEED = 2400;
 
 function testMalletStartsNearOwnGoals() {
@@ -118,7 +117,7 @@ function testTopMalletOverlapFallbackPushesPuckDown() {
   assert.ok(distance >= target - 0.001);
 }
 
-function testStrongSweepUsesOffensiveSpeedBudgetWithoutExceedingMax() {
+function testStrongSweepUsesUncappedOffensiveSpeedBudget() {
   const puck = {
     id: "p0",
     prevX: 295,
@@ -141,12 +140,8 @@ function testStrongSweepUsesOffensiveSpeedBudgetWithoutExceedingMax() {
   const result = resolveSweptPuckMalletContact(TABLE, CONFIG, puck, mallet, 0, 1000);
 
   assert.ok(result, "strong sweep should hit the static puck");
-  const capped = { vx: result.vx, vy: result.vy };
-  capTestPuckSpeed(capped);
-
-  const speed = Math.hypot(capped.vx, capped.vy);
+  const speed = Math.hypot(result.vx, result.vy);
   assert.ok(speed > PRE_OFFENSE_PUCK_MAX_SPEED, "strong sweep should exceed the previous max-speed budget");
-  assert.ok(speed <= PUCK_MAX_SPEED + 0.001, "strong sweep should stay capped by the new puck max speed");
 }
 
 function testFastPuckCannotTunnelThroughStationaryMallet() {
@@ -224,21 +219,13 @@ function testMalletStepLimiterCapsInputJump() {
   assert.equal(limited.y, 0);
 }
 
-function capTestPuckSpeed(puck) {
-  const speed = Math.hypot(puck.vx, puck.vy);
-  if (speed <= PUCK_MAX_SPEED || speed <= 0.001) return;
-  const scale = PUCK_MAX_SPEED / speed;
-  puck.vx *= scale;
-  puck.vy *= scale;
-}
-
 const tests = [
   testMalletStartsNearOwnGoals,
   testServeAvoidsMallets,
   testFastMalletSweepHitsStaticPuck,
   testBottomMalletOverlapFallbackPushesPuckUp,
   testTopMalletOverlapFallbackPushesPuckDown,
-  testStrongSweepUsesOffensiveSpeedBudgetWithoutExceedingMax,
+  testStrongSweepUsesUncappedOffensiveSpeedBudget,
   testFastPuckCannotTunnelThroughStationaryMallet,
   testGoalScoredWhenPuckCrossesLineBetweenFrames,
   testPuckInertiaDampsWithoutSnappingFastPuck,
