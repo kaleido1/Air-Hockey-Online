@@ -6,7 +6,8 @@ import {
   getMalletStart,
   getServeAnchorY,
   limitPointStep,
-  resolveSweptPuckMalletContact
+  resolveSweptPuckMalletContact,
+  separatePuckFromMallet
 } from "../public/offline-physics.js";
 
 const TABLE = {
@@ -19,17 +20,19 @@ const TABLE = {
 };
 
 const CONFIG = {
-  blockReleaseSpeed: 150,
+  blockReleaseSpeed: 165,
   contactSeparation: 0.2,
   contactSlop: 0.7,
   frictionPerSecond: 0.985,
   hardContactSeparation: 1.4,
   linearFriction: 18,
-  malletTransfer: 0.5,
+  malletTransfer: 0.56,
   rehitSuppressionMs: 68,
   restitution: 0.72,
   stopSpeed: 16
 };
+const PUCK_MAX_SPEED = 2550;
+const PRE_OFFENSE_PUCK_MAX_SPEED = 2400;
 
 function testMalletStartsNearOwnGoals() {
   const offset = TABLE.malletRadius + 34;
@@ -89,6 +92,61 @@ function testFastMalletSweepHitsStaticPuck() {
   assert.ok(result, "fast sweep should hit the static puck");
   assert.ok(Math.hypot(result.x - mallet.x, result.y - mallet.y) >= TABLE.malletRadius + TABLE.puckRadius);
   assert.ok(Math.hypot(result.vx, result.vy) >= CONFIG.blockReleaseSpeed);
+}
+
+function testBottomMalletOverlapFallbackPushesPuckUp() {
+  const mallet = { x: TABLE.width / 2, y: TABLE.height * 0.72, vx: 0, vy: 0 };
+  const puck = { x: mallet.x, y: mallet.y, vx: 0, vy: 0 };
+  const result = separatePuckFromMallet(TABLE, CONFIG, puck, mallet, 0);
+  const distance = Math.hypot(puck.x - mallet.x, puck.y - mallet.y);
+  const target = TABLE.malletRadius + TABLE.puckRadius + CONFIG.hardContactSeparation;
+
+  assert.ok(result, "overlapping bottom mallet should separate the puck");
+  assert.ok(puck.y < mallet.y, "bottom mallet should push concentric puck upward");
+  assert.ok(distance >= target - 0.001);
+}
+
+function testTopMalletOverlapFallbackPushesPuckDown() {
+  const mallet = { x: TABLE.width / 2, y: TABLE.height * 0.28, vx: 0, vy: 0 };
+  const puck = { x: mallet.x, y: mallet.y, vx: 0, vy: 0 };
+  const result = separatePuckFromMallet(TABLE, CONFIG, puck, mallet, 1);
+  const distance = Math.hypot(puck.x - mallet.x, puck.y - mallet.y);
+  const target = TABLE.malletRadius + TABLE.puckRadius + CONFIG.hardContactSeparation;
+
+  assert.ok(result, "overlapping top mallet should separate the puck");
+  assert.ok(puck.y > mallet.y, "top mallet should push concentric puck downward");
+  assert.ok(distance >= target - 0.001);
+}
+
+function testStrongSweepUsesOffensiveSpeedBudgetWithoutExceedingMax() {
+  const puck = {
+    id: "p0",
+    prevX: 295,
+    prevY: 512,
+    x: 295,
+    y: 512,
+    vx: 0,
+    vy: 0,
+    lastMalletHitIndex: null,
+    lastMalletHitAt: 0
+  };
+  const mallet = {
+    physicsPrevX: 120,
+    physicsPrevY: 512,
+    x: 470,
+    y: 512,
+    vx: 4300,
+    vy: 0
+  };
+  const result = resolveSweptPuckMalletContact(TABLE, CONFIG, puck, mallet, 0, 1000);
+
+  assert.ok(result, "strong sweep should hit the static puck");
+  const capped = { vx: result.vx, vy: result.vy };
+  capTestPuckSpeed(capped);
+
+  const speed = Math.hypot(capped.vx, capped.vy);
+  assert.ok(speed > PRE_OFFENSE_PUCK_MAX_SPEED, "strong sweep should exceed the previous max-speed budget");
+  assert.ok(speed <= PUCK_MAX_SPEED + 0.001, "strong sweep should stay capped by the new puck max speed");
 }
 
 function testFastPuckCannotTunnelThroughStationaryMallet() {
@@ -166,10 +224,21 @@ function testMalletStepLimiterCapsInputJump() {
   assert.equal(limited.y, 0);
 }
 
+function capTestPuckSpeed(puck) {
+  const speed = Math.hypot(puck.vx, puck.vy);
+  if (speed <= PUCK_MAX_SPEED || speed <= 0.001) return;
+  const scale = PUCK_MAX_SPEED / speed;
+  puck.vx *= scale;
+  puck.vy *= scale;
+}
+
 const tests = [
   testMalletStartsNearOwnGoals,
   testServeAvoidsMallets,
   testFastMalletSweepHitsStaticPuck,
+  testBottomMalletOverlapFallbackPushesPuckUp,
+  testTopMalletOverlapFallbackPushesPuckDown,
+  testStrongSweepUsesOffensiveSpeedBudgetWithoutExceedingMax,
   testFastPuckCannotTunnelThroughStationaryMallet,
   testGoalScoredWhenPuckCrossesLineBetweenFrames,
   testPuckInertiaDampsWithoutSnappingFastPuck,

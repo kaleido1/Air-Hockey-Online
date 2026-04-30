@@ -6,7 +6,8 @@ import {
   getMalletStart as getMalletStartCore,
   getServeAnchorY as getServeAnchorYCore,
   limitPointStep,
-  resolveSweptPuckMalletContact
+  resolveSweptPuckMalletContact,
+  separatePuckFromMallet
 } from "./offline-physics.js";
 
 const canvas = document.querySelector("#rink");
@@ -294,12 +295,14 @@ const LOCAL_BLOCK_INPUT_GRACE_MS = 70;
 const LOCAL_CONTACT_SEPARATION = 0.2;
 const LOCAL_HARD_CONTACT_SEPARATION = 1.4;
 const LOCAL_CONTACT_SLOP = 0.7;
-const LOCAL_BLOCK_RELEASE_SPEED = 150;
+const LOCAL_BLOCK_RELEASE_SPEED = 165;
 const LOCAL_WALL_RESTITUTION = 0.91;
 const LOCAL_FRICTION_PER_SECOND = 0.985;
 const LOCAL_LINEAR_FRICTION = 18;
 const LOCAL_PUCK_STOP_SPEED = 16;
-const LOCAL_PUCK_MAX_SPEED = 2400;
+const LOCAL_PUCK_MAX_SPEED = 2550;
+const LOCAL_STRONG_SWEEP_TANGENTIAL_TRANSFER = 0.08;
+const LOCAL_STRONG_SWEEP_TANGENTIAL_MAX = 180;
 const OFFLINE_PHYSICS_HZ = 240;
 const OFFLINE_DT = 1 / OFFLINE_PHYSICS_HZ;
 const OFFLINE_MAX_FRAME_MS = 60;
@@ -1306,8 +1309,8 @@ function resolveOfflineMalletSweep(index, fromX, fromY, toX, toY, inputDt, now) 
     normalY /= normalLength;
 
     const puckSpeed = Math.hypot(puck.vx || 0, puck.vy || 0);
-    const staticKick = puckSpeed < 70 ? 440 : 0;
-    const sweepKick = staticKick > 0 && malletSpeed > 260 ? 380 : 0;
+    const staticKick = puckSpeed < 70 ? 500 : 0;
+    const sweepKick = staticKick > 0 && malletSpeed > 260 ? 440 : 0;
     let exitX = normalX;
     let exitY = normalY;
     if (sweepKick > 0) {
@@ -1322,11 +1325,12 @@ function resolveOfflineMalletSweep(index, fromX, fromY, toX, toY, inputDt, now) 
       exitY = blendedY / blendedLength;
     }
 
-    const strike = Math.min(LOCAL_PUCK_MAX_SPEED, Math.max(staticKick, 160 + malletSpeed * 0.09));
+    const strike = Math.min(LOCAL_PUCK_MAX_SPEED, Math.max(staticKick, 170 + malletSpeed * 0.105));
     puck.x = contactMalletX + exitX * (minDistance + LOCAL_HARD_CONTACT_SEPARATION);
     puck.y = contactMalletY + exitY * (minDistance + LOCAL_HARD_CONTACT_SEPARATION);
-    puck.vx = exitX * strike + moveX * sweepKick + sweepX * 7.5;
-    puck.vy = exitY * strike + moveY * sweepKick + sweepY * 7.5;
+    puck.vx = exitX * strike + moveX * sweepKick + sweepX * 8;
+    puck.vy = exitY * strike + moveY * sweepKick + sweepY * 8;
+    addLocalTangentialSweep(puck, normalX, normalY, moveX, moveY, malletSpeed);
     capLocalPredictedPuckSpeed(puck);
     puck.lastMalletHitIndex = index;
     puck.lastMalletHitAt = now;
@@ -1335,6 +1339,20 @@ function resolveOfflineMalletSweep(index, fromX, fromY, toX, toY, inputDt, now) 
     lastLocalHitFxAt = now;
     playFx("hit", Math.min(1, strike / 900));
   }
+}
+
+function addLocalTangentialSweep(puck, normalX, normalY, moveX, moveY, malletSpeed) {
+  if (malletSpeed <= 650) return;
+  const tangentX = -normalY;
+  const tangentY = normalX;
+  const tangentSpeed = (moveX * tangentX + moveY * tangentY) * malletSpeed;
+  const tangentCarry = clamp(
+    tangentSpeed * LOCAL_STRONG_SWEEP_TANGENTIAL_TRANSFER,
+    -LOCAL_STRONG_SWEEP_TANGENTIAL_MAX,
+    LOCAL_STRONG_SWEEP_TANGENTIAL_MAX
+  );
+  puck.vx += tangentX * tangentCarry;
+  puck.vy += tangentY * tangentCarry;
 }
 
 function syncOfflinePuckBody(puck) {
@@ -1460,8 +1478,13 @@ function resolveOfflinePuckMalletContacts(puck, dt) {
   const minDistance = TABLE.malletRadius + TABLE.puckRadius;
   for (let index = 0; index < offlineGame.state.mallets.length; index += 1) {
     const mallet = offlineGame.state.mallets[index];
-    const result = resolveSweptPuckMalletContact(TABLE, offlinePhysicsConfig(), puck, mallet, index, now);
-    if (!result) continue;
+    const config = offlinePhysicsConfig();
+    const result = resolveSweptPuckMalletContact(TABLE, config, puck, mallet, index, now);
+    if (!result) {
+      const separated = separatePuckFromMallet(TABLE, config, puck, mallet, index);
+      if (separated) syncOfflinePuckBody(puck);
+      continue;
+    }
 
     puck.lastMalletHitIndex = index;
     puck.lastMalletHitAt = now;
@@ -2120,8 +2143,8 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
     const moveY = sweepY / moveLength;
 
     const puckSpeed = Math.hypot(visualPuck.vx || 0, visualPuck.vy || 0);
-    const staticKick = puckSpeed < 70 ? 440 : 0;
-    const sweepKick = staticKick > 0 && malletSpeed > 260 ? 380 : 0;
+    const staticKick = puckSpeed < 70 ? 500 : 0;
+    const sweepKick = staticKick > 0 && malletSpeed > 260 ? 440 : 0;
     let exitX = normalX;
     let exitY = normalY;
     if (sweepKick > 0) {
@@ -2142,9 +2165,11 @@ function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSp
       y: contactMalletY + exitY * (minDistance + LOCAL_HARD_CONTACT_SEPARATION)
     };
 
-    const strike = Math.min(LOCAL_PUCK_MAX_SPEED, Math.max(staticKick, 160 + malletSpeed * 0.09));
-    predictedPuck.vx = exitX * strike + moveX * sweepKick + sweepX * 7.5;
-    predictedPuck.vy = exitY * strike + moveY * sweepKick + sweepY * 7.5;
+    const strike = Math.min(LOCAL_PUCK_MAX_SPEED, Math.max(staticKick, 170 + malletSpeed * 0.105));
+    predictedPuck.vx = exitX * strike + moveX * sweepKick + sweepX * 8;
+    predictedPuck.vy = exitY * strike + moveY * sweepKick + sweepY * 8;
+    addLocalTangentialSweep(predictedPuck, normalX, normalY, moveX, moveY, malletSpeed);
+    capLocalPredictedPuckSpeed(predictedPuck);
     predictedPuck.x += predictedPuck.vx * 0.014;
     predictedPuck.y += predictedPuck.vy * 0.014;
     markPuckPredicted(puck.id, now);
@@ -2459,7 +2484,7 @@ function offlinePhysicsConfig() {
     frictionPerSecond: LOCAL_FRICTION_PER_SECOND,
     hardContactSeparation: LOCAL_HARD_CONTACT_SEPARATION,
     linearFriction: LOCAL_LINEAR_FRICTION,
-    malletTransfer: 0.5,
+    malletTransfer: 0.56,
     rehitSuppressionMs: LOCAL_REHIT_SUPPRESSION_MS,
     restitution: 0.72,
     stopSpeed: LOCAL_PUCK_STOP_SPEED
@@ -3877,12 +3902,12 @@ function drawGoalSlot(y, outer) {
 
 function drawState(state) {
   ctx.save();
-  for (let index = 0; index < (state.pucks || []).length; index += 1) {
-    drawPuck(displayPuck(state.pucks[index], state), index);
-  }
-
   for (let index = 0; index < state.mallets.length; index += 1) {
     drawMallet(displayMallet(state.mallets[index], index));
+  }
+
+  for (let index = 0; index < (state.pucks || []).length; index += 1) {
+    drawPuck(displayPuck(state.pucks[index], state), index);
   }
 
   ctx.restore();

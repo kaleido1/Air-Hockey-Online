@@ -54,6 +54,31 @@ export function limitPointStep(fromX, fromY, toX, toY, maxDistance) {
   };
 }
 
+export function separatePuckFromMallet(table, config = {}, puck, mallet, index = null) {
+  const minDistance = table.malletRadius + table.puckRadius;
+  const targetDistance = minDistance + Math.max(0, config.hardContactSeparation || config.contactSeparation || 0);
+  const dx = (puck.x || 0) - (mallet.x || 0);
+  const dy = (puck.y || 0) - (mallet.y || 0);
+  const distance = Math.hypot(dx, dy);
+  if (distance >= targetDistance) return null;
+
+  const normal =
+    distance > 0.001
+      ? { nx: dx / distance, ny: dy / distance }
+      : fallbackMalletNormal(table, index, 0, 0, mallet);
+
+  puck.x = mallet.x + normal.nx * targetDistance;
+  puck.y = mallet.y + normal.ny * targetDistance;
+
+  return {
+    ...normal,
+    distance,
+    minDistance,
+    targetDistance,
+    overlap: targetDistance - distance
+  };
+}
+
 export function chooseSafeServePosition(table, config, state, preferredX, preferredY, server) {
   const r = table.puckRadius;
   const top = server === 0 ? table.height / 2 + r + 12 : r + 12;
@@ -172,9 +197,16 @@ export function resolveSweptPuckMalletContact(table, config, puck, mallet, index
   let ny = contactPuckY - contactMalletY;
   let length = Math.hypot(nx, ny);
   if (length <= 0.001) {
-    nx = relativeDeltaX || (puck.vx || 0) - (mallet.vx || 0) || 1;
-    ny = relativeDeltaY || (puck.vy || 0) - (mallet.vy || 0) || 0;
-    length = Math.hypot(nx, ny) || 1;
+    const normal = fallbackMalletNormal(
+      table,
+      index,
+      relativeDeltaX || (puck.vx || 0) - (mallet.vx || 0),
+      relativeDeltaY || (puck.vy || 0) - (mallet.vy || 0),
+      mallet
+    );
+    nx = normal.nx;
+    ny = normal.ny;
+    length = 1;
   }
   nx /= length;
   ny /= length;
@@ -225,6 +257,22 @@ function isSafeServeCandidate(candidate, state, malletDistance, puckDistance) {
     if (Math.hypot(candidate.x - puck.x, candidate.y - puck.y) < puckDistance) return false;
   }
   return true;
+}
+
+function fallbackMalletNormal(table, index, preferredX = 0, preferredY = 0, mallet = null) {
+  const preferredLength = Math.hypot(preferredX, preferredY);
+  if (preferredLength > 0.001) {
+    return {
+      nx: preferredX / preferredLength,
+      ny: preferredY / preferredLength
+    };
+  }
+  if (index === 0) return { nx: 0, ny: -1 };
+  if (index === 1) return { nx: 0, ny: 1 };
+  if (mallet && Number.isFinite(mallet.y)) {
+    return mallet.y > table.height / 2 ? { nx: 0, ny: -1 } : { nx: 0, ny: 1 };
+  }
+  return { nx: 1, ny: 0 };
 }
 
 function findEarliestSweepContact(startX, startY, deltaX, deltaY, radius, epsilon = 0) {

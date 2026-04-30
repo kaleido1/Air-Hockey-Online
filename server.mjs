@@ -11,7 +11,8 @@ import {
 } from "./public/protocol.js";
 import {
   applyPuckInertia,
-  limitPointStep
+  limitPointStep,
+  separatePuckFromMallet
 } from "./public/offline-physics.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -39,23 +40,25 @@ const MALLET_MAX_SPEED = 3600;
 const HUMAN_MALLET_MAX_SPEED = 3800;
 const BOT_MIN_SPEED = 1700;
 const BOT_MAX_SPEED = 3400;
-const PUCK_MAX_SPEED = 2400;
+const PUCK_MAX_SPEED = 2550;
 const PUCK_MIN_SERVE_SPEED = 520;
 const PUCK_MIN_LIVE_SPEED = 120;
 const WALL_RESTITUTION = 0.91;
 const PUCK_RESTITUTION = 0.78;
 const MALLET_RESTITUTION = 0.72;
-const MALLET_STRIKE_TRANSFER = 0.5;
+const MALLET_STRIKE_TRANSFER = 0.56;
 const MALLET_HIT_COOLDOWN_MS = 68;
 const CONTACT_SEPARATION = 0.2;
 const HARD_CONTACT_SEPARATION = 1.4;
 const CONTACT_SLOP = 0.12;
 const STATIC_PUCK_SPEED = 70;
-const STATIC_STRIKE_MIN_SPEED = 440;
-const STATIC_SWEEP_MIN_SPEED = 380;
+const STATIC_STRIKE_MIN_SPEED = 500;
+const STATIC_SWEEP_MIN_SPEED = 440;
 const EDGE_BLOCK_RESPONSE_SPEED = 36;
 const STRONG_STRIKE_MIN_SPEED = 160;
-const STRIKE_ESCAPE_TRANSFER = 0.34;
+const STRIKE_ESCAPE_TRANSFER = 0.38;
+const STRONG_SWEEP_TANGENTIAL_TRANSFER = 0.08;
+const STRONG_SWEEP_TANGENTIAL_MAX = 180;
 const PUCK_SUBSTEPS = 14;
 const IMMEDIATE_HIT_STATE_GAP_MS = 6;
 const INPUT_STATE_GAP_MS = 8;
@@ -865,10 +868,9 @@ function applyDirectInputSweep(room, mallet, malletIndex, targetX, targetY, inpu
   const anyHit = resolveInputHits(room, mallet, malletIndex, inputDt, false);
 
   for (const puck of room.state.pucks) {
-    forceSeparatePuckFromMallet(room, puck, mallet, malletIndex);
+    forceSeparatePuckFromAllMallets(room, puck);
     collidePuckWithWalls(room, puck);
     capPuckSpeed(puck);
-    syncPuckHistory(puck);
   }
 
   if (anyHit) sendImmediateHitState(room, now);
@@ -892,6 +894,7 @@ function tickRooms() {
     if (room.players[1]?.bot) updateBot(room);
 
     moveMallets(room.state, DT);
+    if (room.state.phase === "playing") settlePuckMalletOverlaps(room);
 
     if (room.state.phase === "countdown" && now >= room.state.phaseEndsAt) {
       room.state.phase = "playing";
@@ -963,6 +966,15 @@ function resolveInputHits(room, mallet, malletIndex, dt, emitState = true) {
   return anyHit;
 }
 
+function settlePuckMalletOverlaps(room) {
+  if (!room?.state?.pucks?.length) return;
+  for (const puck of room.state.pucks) {
+    forceSeparatePuckFromAllMallets(room, puck);
+    collidePuckWithWalls(room, puck);
+    capPuckSpeed(puck);
+  }
+}
+
 function stepPucks(room, dt) {
   const state = room.state;
   const scored = [];
@@ -981,11 +993,17 @@ function stepPucks(room, dt) {
     const hitA = collidePuckWithMallet(room, puck, state.mallets[0], 0, dt);
     if (hitA) {
       anyMalletHit = true;
+      forceSeparatePuckFromAllMallets(room, puck);
+      collidePuckWithWalls(room, puck);
+      capPuckSpeed(puck);
       emitFx(room, "hit", false, hitA);
     }
     const hitB = collidePuckWithMallet(room, puck, state.mallets[1], 1, dt);
     if (hitB) {
       anyMalletHit = true;
+      forceSeparatePuckFromAllMallets(room, puck);
+      collidePuckWithWalls(room, puck);
+      capPuckSpeed(puck);
       emitFx(room, "hit", false, hitB);
     }
     forceSeparatePuckFromAllMallets(room, puck);
@@ -1088,35 +1106,16 @@ function rescueStuckPuck(room, puck, dt) {
 }
 
 function forceSeparatePuckFromMallet(room, puck, mallet, malletIndex = null) {
-  const minDistance = TABLE.puckRadius + TABLE.malletRadius;
-  const contact = getSatCircleContact(mallet.x, mallet.y, TABLE.malletRadius, puck.x, puck.y, TABLE.puckRadius);
-  let dx = contact?.nx ?? puck.x - mallet.x;
-  let dy = contact?.ny ?? puck.y - mallet.y;
-  let distance = Math.hypot(dx, dy);
-  if (!contact && distance >= minDistance) return;
-
   const release = getActiveMalletRelease(puck, malletIndex);
   if (release) {
     maintainMalletLeavingState(room, puck, mallet, release);
     return;
   }
 
-  if (distance <= 0.001) {
-    dx = puck.vx - mallet.vx;
-    dy = puck.vy - mallet.vy;
-    distance = Math.hypot(dx, dy);
-    if (distance <= 0.001) {
-      dx = 0;
-      dy = -1;
-      distance = 1;
-    }
-  }
+  const separation = separatePuckFromMallet(TABLE, physicsContactConfig(), puck, mallet, malletIndex);
+  if (!separation) return;
 
-  const nx = dx / distance;
-  const ny = dy / distance;
-  const overlap = (contact?.overlap ?? minDistance - distance) + CONTACT_SEPARATION + 0.18;
-  puck.x += nx * overlap;
-  puck.y += ny * overlap;
+  const { nx, ny, overlap } = separation;
 
   const relativeNormalSpeed = (puck.vx - mallet.vx) * nx + (puck.vy - mallet.vy) * ny;
   const strikeSpeed = Math.max(0, mallet.vx * nx + mallet.vy * ny);
@@ -1131,6 +1130,13 @@ function forceSeparatePuckFromMallet(room, puck, mallet, malletIndex = null) {
     puck.vy += ny * correction;
     capPuckSpeed(puck);
   }
+}
+
+function physicsContactConfig() {
+  return {
+    contactSeparation: CONTACT_SEPARATION,
+    hardContactSeparation: HARD_CONTACT_SEPARATION
+  };
 }
 
 function forceSeparatePuckFromAllMallets(room, puck) {
@@ -1276,7 +1282,7 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
     distance = Math.hypot(dx, dy);
     if (distance <= 0.001) {
       dx = strikeVx || sweepX || 0;
-      dy = strikeVy || sweepY || -1;
+      dy = strikeVy || sweepY || (malletIndex === 1 ? 1 : -1);
       distance = 1;
     }
   }
@@ -1389,6 +1395,19 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
       puck.vx += moveX * carry;
       puck.vy += moveY * carry;
     }
+  }
+
+  if (sweptHit && strongDrive && malletSpeed > 650) {
+    const tangentX = -ny;
+    const tangentY = nx;
+    const tangentSpeed = strikeVx * tangentX + strikeVy * tangentY;
+    const tangentCarry = clamp(
+      tangentSpeed * STRONG_SWEEP_TANGENTIAL_TRANSFER,
+      -STRONG_SWEEP_TANGENTIAL_MAX,
+      STRONG_SWEEP_TANGENTIAL_MAX
+    );
+    puck.vx += tangentX * tangentCarry;
+    puck.vy += tangentY * tangentCarry;
   }
 
   capPuckSpeed(puck);
@@ -1910,6 +1929,7 @@ function sendSnapshots() {
 }
 
 function sendRoomState(room, now = Date.now(), force = false) {
+  if (room.state.phase === "playing") settlePuckMalletOverlaps(room);
   const state = publicState(room.state);
   const sent = new Set();
   for (const player of room.players) {
@@ -2276,12 +2296,97 @@ export function runRepeatedContactReleaseSelfTest() {
   room.state.pucks = [puck];
 
   const hit = collidePuckWithMallet(room, puck, mallet, 0, 1 / PHYSICS_HZ);
+  const speedAfterFirst = Math.hypot(puck.vx, puck.vy);
+  forceSeparatePuckFromAllMallets(room, puck);
+  const secondHit = collidePuckWithMallet(room, puck, mallet, 0, 1 / PHYSICS_HZ);
+  const speedAfterSecond = Math.hypot(puck.vx, puck.vy);
+  const distance = Math.hypot(puck.x - mallet.x, puck.y - mallet.y);
+  const targetDistance = TABLE.malletRadius + TABLE.puckRadius + HARD_CONTACT_SEPARATION;
   return {
     hit: Boolean(hit),
+    secondHit: Boolean(secondHit),
+    distance,
+    targetDistance,
     vx: puck.vx,
     vy: puck.vy,
-    speed: Math.hypot(puck.vx, puck.vy),
-    passed: Boolean(hit) && puck.vx >= PUCK_MIN_LIVE_SPEED
+    speed: speedAfterSecond,
+    speedAfterFirst,
+    speedAfterSecond,
+    passed:
+      Boolean(hit) &&
+      !secondHit &&
+      puck.vx >= PUCK_MIN_LIVE_SPEED &&
+      speedAfterSecond <= Math.min(PUCK_MAX_SPEED, speedAfterFirst + 1) &&
+      distance >= targetDistance - 0.001
+  };
+}
+
+export function runDirectInputNoSwallowSelfTest() {
+  const now = Date.now();
+  const room = makeRoom({ puckCount: 1, lan: true });
+  room.players = [null, null];
+  room.state.phase = "playing";
+  room.state.pucks = [
+    {
+      id: "direct-input-no-swallow",
+      x: TABLE.width / 2,
+      y: TABLE.height * 0.72,
+      prevX: TABLE.width / 2,
+      prevY: TABLE.height * 0.72,
+      vx: 0,
+      vy: 0,
+      stuckFor: 0,
+      lastMalletHitIndex: null,
+      lastMalletHitAt: 0,
+      hitSerial: 0
+    }
+  ];
+
+  const mallet = room.state.mallets[0];
+  mallet.x = TABLE.width / 2 - 110;
+  mallet.y = TABLE.height * 0.72;
+  mallet.targetX = mallet.x;
+  mallet.targetY = mallet.y;
+  mallet.vx = 0;
+  mallet.vy = 0;
+  mallet.lastInputAt = now - 40;
+  mallet.sweepFromX = mallet.x;
+  mallet.sweepFromY = mallet.y;
+  mallet.sweepStartedAt = mallet.lastInputAt;
+  mallet.hasPendingSweep = true;
+
+  const client = {
+    id: "self-test-client",
+    roomCode: room.code,
+    playerIndex: 0,
+    lastInputSeq: 0
+  };
+  updateInput(client, {
+    playerIndex: 0,
+    x: TABLE.width / 2 + 110,
+    y: TABLE.height * 0.72,
+    inputSeq: 1
+  });
+  sendRoomState(room, now, true);
+
+  const snapshot = publicState(room.state);
+  const puck = snapshot.pucks[0];
+  const publicMallet = snapshot.mallets[0];
+  const distance = Math.hypot(puck.x - publicMallet.x, puck.y - publicMallet.y);
+  const targetDistance = TABLE.malletRadius + TABLE.puckRadius + HARD_CONTACT_SEPARATION;
+  const speed = Math.hypot(puck.vx, puck.vy);
+  rooms.delete(room.code);
+
+  return {
+    distance,
+    targetDistance,
+    speed,
+    puck,
+    mallet: publicMallet,
+    passed:
+      distance >= targetDistance - 0.02 &&
+      speed <= PUCK_MAX_SPEED + 0.001 &&
+      puck.x !== publicMallet.x
   };
 }
 
