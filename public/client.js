@@ -236,6 +236,7 @@ let pendingRoomFromUrl = new URLSearchParams(location.search).get("room") || "";
 let pointerDown = false;
 const suppressedGameplayPointers = new Set();
 const lastInputAtByPlayer = [0, 0];
+const lastInputPointByPlayer = [null, null];
 let lastPingSentAt = 0;
 let reconnectTimer = 0;
 let heartbeatTimer = 0;
@@ -285,7 +286,10 @@ let currentCursor = "";
 const outgoingMalletTargets = new Map();
 let serverTickHz = Number(window.AIR_HOCKEY_PHYSICS_HZ) || 360;
 let serverSnapshotHz = Number(window.AIR_HOCKEY_SNAPSHOT_HZ) || 180;
-const LOCAL_HUMAN_MALLET_MAX_SPEED = 3800;
+const LOCAL_HUMAN_MALLET_BASE_SPEED = 4200;
+const LOCAL_HUMAN_MALLET_INPUT_SPEED_SCALE = 1.15;
+const LOCAL_HUMAN_MALLET_MAX_SPEED = 9000;
+const LOCAL_HUMAN_MALLET_SPEED_HOLD_MS = 120;
 const LOCAL_REHIT_SUPPRESSION_MS = 68;
 const LOCAL_CONTACT_SEPARATION = 0.2;
 const LOCAL_HARD_CONTACT_SEPARATION = 1.4;
@@ -549,16 +553,18 @@ window.addEventListener(
 
 canvas.addEventListener("pointerup", (event) => {
   pointerDown = false;
+  const localIndex = activePointers.get(event.pointerId);
   if (suppressedGameplayPointers.delete(event.pointerId)) {
     runPendingPointerUiAction(event.pointerId);
     return;
   }
   if (isActivePlay()) {
     if (!(isLocalGame() && event.pointerType !== "touch")) {
-      const localIndex = activePointers.get(event.pointerId);
       sendPointer(event, true, localIndex);
     }
   }
+  if (localIndex === 0 || localIndex === 1) lastInputPointByPlayer[localIndex] = null;
+  else if (playerIndex === 0 || playerIndex === 1) lastInputPointByPlayer[playerIndex] = null;
   activePointers.delete(event.pointerId);
 });
 
@@ -578,6 +584,7 @@ canvas.addEventListener("pointercancel", () => {
   suppressedGameplayPointers.clear();
   pendingPointerUiActions.clear();
   activePointers.clear();
+  lastInputPointByPlayer.fill(null);
 });
 
 window.addEventListener("keydown", (event) => {
@@ -1012,6 +1019,7 @@ function setButtons() {
 function startOfflineGame(mode, count = puckCount) {
   stopOfflineGame();
   clearControls();
+  lastInputPointByPlayer.fill(null);
   const MatterLib = window.Matter;
   if (!MatterLib?.Engine || !MatterLib?.Bodies || !MatterLib?.Composite || !MatterLib?.Body) {
     setUiNotice("Matter.js unavailable");
@@ -1041,6 +1049,8 @@ function startOfflineGame(mode, count = puckCount) {
         targetY: bottomStart.y,
         vx: 0,
         vy: 0,
+        inputSpeedLimit: LOCAL_HUMAN_MALLET_BASE_SPEED,
+        inputSpeedUntil: 0,
         physicsPrevX: bottomStart.x,
         physicsPrevY: bottomStart.y
       },
@@ -1051,6 +1061,8 @@ function startOfflineGame(mode, count = puckCount) {
         targetY: topStart.y,
         vx: 0,
         vy: 0,
+        inputSpeedLimit: LOCAL_HUMAN_MALLET_BASE_SPEED,
+        inputSpeedUntil: 0,
         physicsPrevX: topStart.x,
         physicsPrevY: topStart.y
       }
@@ -1229,12 +1241,16 @@ function updateOfflineMalletInput(index, point, previousInputAt, now) {
   const fromX = mallet.x;
   const fromY = mallet.y;
   const inputDt = clamp((now - previousInputAt) / 1000, 1 / 300, 1 / 24);
+  const inputSpeed = measureInputSpeed(index, constrained, now, inputDt);
+  const speedLimit = localInputSpeedLimit(inputSpeed, fromX, fromY, constrained.x, constrained.y, inputDt);
+  mallet.inputSpeedLimit = speedLimit;
+  mallet.inputSpeedUntil = now + LOCAL_HUMAN_MALLET_SPEED_HOLD_MS;
   const limited = limitPointStep(
     fromX,
     fromY,
     constrained.x,
     constrained.y,
-    LOCAL_HUMAN_MALLET_MAX_SPEED * inputDt
+    speedLimit * inputDt
   );
   mallet.targetX = constrained.x;
   mallet.targetY = constrained.y;
@@ -1251,6 +1267,7 @@ function updateOfflineMalletInput(index, point, previousInputAt, now) {
     prevY: fromY,
     targetX: constrained.x,
     targetY: constrained.y,
+    inputSpeed,
     inputSeq: nextInputSeq++,
     inputAt: now,
     updatedAt: now,
@@ -1400,12 +1417,13 @@ function moveOfflineControlledMallets(dt, now) {
     if (!Number.isFinite(mallet?.targetX) || !Number.isFinite(mallet?.targetY)) continue;
     const fromX = mallet.x;
     const fromY = mallet.y;
+    const speedLimit = localActiveMalletSpeedLimit(mallet, now);
     const limited = limitPointStep(
       fromX,
       fromY,
       mallet.targetX,
       mallet.targetY,
-      LOCAL_HUMAN_MALLET_MAX_SPEED * dt
+      speedLimit * dt
     );
     if (Math.hypot(limited.x - fromX, limited.y - fromY) <= 0.001) continue;
 
@@ -1431,6 +1449,35 @@ function moveOfflineControlledMallets(dt, now) {
       resolveOfflineMalletSweep(index, fromX, fromY, limited.x, limited.y, dt, now);
     }
   }
+}
+
+function measureInputSpeed(index, point, now, fallbackDt) {
+  const previous = lastInputPointByPlayer[index];
+  const dt = previous ? clamp((now - previous.at) / 1000, 1 / 300, 1 / 24) : fallbackDt;
+  const speed = previous ? Math.hypot(point.x - previous.x, point.y - previous.y) / dt : 0;
+  lastInputPointByPlayer[index] = { x: point.x, y: point.y, at: now };
+  return clamp(speed, 0, LOCAL_HUMAN_MALLET_MAX_SPEED);
+}
+
+function localInputSpeedLimit(inputSpeed, fromX, fromY, targetX, targetY, dt) {
+  const measuredSpeed = Math.hypot(targetX - fromX, targetY - fromY) / Math.max(dt, 1 / 300);
+  const requested = Math.max(
+    LOCAL_HUMAN_MALLET_BASE_SPEED,
+    measuredSpeed,
+    inputSpeed * LOCAL_HUMAN_MALLET_INPUT_SPEED_SCALE
+  );
+  return clamp(requested, LOCAL_HUMAN_MALLET_BASE_SPEED, LOCAL_HUMAN_MALLET_MAX_SPEED);
+}
+
+function localActiveMalletSpeedLimit(mallet, now = performance.now()) {
+  if (mallet?.inputSpeedUntil && now <= mallet.inputSpeedUntil) {
+    return clamp(
+      Number(mallet.inputSpeedLimit) || LOCAL_HUMAN_MALLET_BASE_SPEED,
+      LOCAL_HUMAN_MALLET_BASE_SPEED,
+      LOCAL_HUMAN_MALLET_MAX_SPEED
+    );
+  }
+  return LOCAL_HUMAN_MALLET_BASE_SPEED;
 }
 
 function stepOfflineMatterWorld(dt) {
@@ -1748,6 +1795,7 @@ function clearRoom() {
   stateSnapshots.length = 0;
   roomPlayers = null;
   outgoingMalletTargets.clear();
+  lastInputPointByPlayer.fill(null);
   puckCorrections.clear();
   remoteMalletSamples.forEach((samples) => samples.splice(0));
   nextInputSeq = 1;
@@ -1824,11 +1872,18 @@ function sendPointerFromPoint(point, force, targetIndex) {
   if (serverState?.phase !== "playing") {
     constrained = constrainMalletAwayFromPucks(targetIndex, constrained.x, constrained.y, serverState?.pucks || []);
   }
+  const inputSpeed = measureInputSpeed(
+    targetIndex,
+    constrained,
+    now,
+    clamp((now - previousInputAt) / 1000, 1 / 300, 1 / 24)
+  );
   outgoingMalletTargets.set(targetIndex, {
     x: constrained.x,
     y: constrained.y,
     targetX: constrained.x,
     targetY: constrained.y,
+    inputSpeed,
     inputSeq,
     inputAt: now
   });
@@ -1838,7 +1893,8 @@ function sendPointerFromPoint(point, force, targetIndex) {
       clientTick: Math.round(now),
       playerIndex: targetIndex,
       x: constrained.x,
-      y: constrained.y
+      y: constrained.y,
+      inputSpeed
     })
   );
 }
@@ -2172,6 +2228,7 @@ function clearControls() {
   suppressedGameplayPointers.clear();
   pendingPointerUiActions.clear();
   activePointers.clear();
+  lastInputPointByPlayer.fill(null);
   lastCenterTapAt = 0;
   localPointerMalletIndex = 0;
 }

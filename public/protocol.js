@@ -8,8 +8,8 @@ const PHASES = ["waiting", "countdown", "playing", "point", "paused", "gameover"
 const FX_KINDS = ["hit", "wall", "score", "victory"];
 const MAX_PUCKS = 2;
 
-export function encodeInputPacket({ inputSeq, clientTick, playerIndex, x, y }) {
-  const packet = new Uint8Array(10);
+export function encodeInputPacket({ inputSeq, clientTick, playerIndex, x, y, inputSpeed = 0 }) {
+  const packet = new Uint8Array(12);
   const view = new DataView(packet.buffer);
   packet[0] = MESSAGE.INPUT;
   view.setUint16(1, inputSeq & 0xffff);
@@ -17,6 +17,7 @@ export function encodeInputPacket({ inputSeq, clientTick, playerIndex, x, y }) {
   packet[5] = clampByte(playerIndex);
   view.setUint16(6, clampUint16(x));
   view.setUint16(8, clampUint16(y));
+  view.setUint16(10, clampUint16(inputSpeed));
   return packet;
 }
 
@@ -30,7 +31,8 @@ export function decodeInputPacket(packet) {
     clientTick: view.getUint16(3),
     playerIndex: bytes[5],
     x: view.getUint16(6),
-    y: view.getUint16(8)
+    y: view.getUint16(8),
+    inputSpeed: bytes.length >= 12 ? view.getUint16(10) : 0
   };
 }
 
