@@ -13,7 +13,7 @@ import {
 const TABLE = {
   width: 590,
   height: 1024,
-  goalWidth: 178,
+  goalWidth: 256,
   malletRadius: 54,
   puckRadius: 29,
   firstTo: 7
@@ -172,6 +172,7 @@ function testFastPuckCannotTunnelThroughStationaryMallet() {
 }
 
 function testGoalScoredWhenPuckCrossesLineBetweenFrames() {
+  const goalEdgeX = TABLE.width / 2 + TABLE.goalWidth / 2;
   const topGoal = {
     prevX: TABLE.width / 2,
     prevY: 34,
@@ -188,9 +189,27 @@ function testGoalScoredWhenPuckCrossesLineBetweenFrames() {
     vx: 0,
     vy: 1500
   };
+  const insideArcIntersection = {
+    prevX: goalEdgeX - 0.5,
+    prevY: TABLE.height - 34,
+    x: goalEdgeX - 0.5,
+    y: TABLE.height + 48,
+    vx: 0,
+    vy: 1500
+  };
+  const outsideArcIntersection = {
+    prevX: goalEdgeX + 0.5,
+    prevY: TABLE.height - 34,
+    x: goalEdgeX + 0.5,
+    y: TABLE.height + 48,
+    vx: 0,
+    vy: 1500
+  };
 
   assert.equal(detectGoalCrossing(TABLE, topGoal), 0);
   assert.equal(detectGoalCrossing(TABLE, bottomGoal), 1);
+  assert.equal(detectGoalCrossing(TABLE, insideArcIntersection), 1);
+  assert.equal(detectGoalCrossing(TABLE, outsideArcIntersection), null);
 }
 
 function testPuckInertiaDampsWithoutSnappingFastPuck() {
@@ -238,7 +257,8 @@ const tests = [
 process.env.AIR_HOCKEY_NO_LISTEN = "1";
 const {
   runActiveDisconnectSelfTest,
-  runSlowPuckNoHardStopSelfTest
+  runSlowPuckNoHardStopSelfTest,
+  runTickConfigSelfTest
 } = await import("../server.mjs");
 
 function testActiveDisconnectClosesRemoteRoom() {
@@ -251,7 +271,12 @@ function testServerSlowPuckIsNotHardStopped() {
   assert.ok(result.passed, JSON.stringify(result));
 }
 
-tests.push(testActiveDisconnectClosesRemoteRoom, testServerSlowPuckIsNotHardStopped);
+function testServerUsesChosenTickRates() {
+  const result = runTickConfigSelfTest();
+  assert.ok(result.passed, JSON.stringify(result));
+}
+
+tests.push(testActiveDisconnectClosesRemoteRoom, testServerSlowPuckIsNotHardStopped, testServerUsesChosenTickRates);
 
 for (const test of tests) {
   await test();
