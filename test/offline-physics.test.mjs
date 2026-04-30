@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import {
+  applyPuckInertia,
   chooseSafeServePosition,
   detectGoalCrossing,
   getMalletStart,
   getServeAnchorY,
+  limitPointStep,
   resolveSweptPuckMalletContact
 } from "../public/offline-physics.js";
 
@@ -17,13 +19,16 @@ const TABLE = {
 };
 
 const CONFIG = {
-  blockReleaseSpeed: 180,
-  contactSeparation: 0.12,
-  contactSlop: 1.4,
-  hardContactSeparation: 1.0,
-  malletTransfer: 0.62,
-  rehitSuppressionMs: 45,
-  restitution: 0.8
+  blockReleaseSpeed: 150,
+  contactSeparation: 0.2,
+  contactSlop: 0.7,
+  frictionPerSecond: 0.985,
+  hardContactSeparation: 1.4,
+  linearFriction: 18,
+  malletTransfer: 0.5,
+  rehitSuppressionMs: 68,
+  restitution: 0.72,
+  stopSpeed: 16
 };
 
 function testMalletStartsNearOwnGoals() {
@@ -135,12 +140,41 @@ function testGoalScoredWhenPuckCrossesLineBetweenFrames() {
   assert.equal(detectGoalCrossing(TABLE, bottomGoal), 1);
 }
 
+function testPuckInertiaDampsWithoutSnappingFastPuck() {
+  const puck = { vx: 1000, vy: 0 };
+
+  applyPuckInertia(puck, CONFIG, 0.5);
+
+  assert.ok(puck.vx < 1000, "surface drag should slow the puck");
+  assert.ok(puck.vx > 950, "fast pucks should keep most of their momentum over a short step");
+  assert.equal(puck.vy, 0);
+}
+
+function testPuckInertiaSettlesTinyJitter() {
+  const puck = { vx: 9, vy: 5 };
+
+  applyPuckInertia(puck, CONFIG, 1 / 240);
+
+  assert.equal(puck.vx, 0);
+  assert.equal(puck.vy, 0);
+}
+
+function testMalletStepLimiterCapsInputJump() {
+  const limited = limitPointStep(0, 0, 100, 0, 38);
+
+  assert.equal(limited.x, 38);
+  assert.equal(limited.y, 0);
+}
+
 const tests = [
   testMalletStartsNearOwnGoals,
   testServeAvoidsMallets,
   testFastMalletSweepHitsStaticPuck,
   testFastPuckCannotTunnelThroughStationaryMallet,
-  testGoalScoredWhenPuckCrossesLineBetweenFrames
+  testGoalScoredWhenPuckCrossesLineBetweenFrames,
+  testPuckInertiaDampsWithoutSnappingFastPuck,
+  testPuckInertiaSettlesTinyJitter,
+  testMalletStepLimiterCapsInputJump
 ];
 
 for (const test of tests) {

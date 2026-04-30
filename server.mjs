@@ -9,6 +9,10 @@ import {
   encodeFxPacket,
   encodeStatePacket
 } from "./public/protocol.js";
+import {
+  applyPuckInertia,
+  limitPointStep
+} from "./public/offline-physics.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
@@ -28,35 +32,43 @@ const TABLE = {
   firstTo: 7
 };
 
-const PHYSICS_HZ = 180;
-const SNAPSHOT_HZ = 120;
+const PHYSICS_HZ = 240;
+const SNAPSHOT_HZ = 144;
 const DT = 1 / PHYSICS_HZ;
-const MALLET_MAX_SPEED = 5200;
-const HUMAN_MALLET_MAX_SPEED = 6800;
-const BOT_MIN_SPEED = 2100;
-const BOT_MAX_SPEED = 4550;
-const PUCK_MAX_SPEED = 2600;
+const MALLET_MAX_SPEED = 3600;
+const HUMAN_MALLET_MAX_SPEED = 3800;
+const BOT_MIN_SPEED = 1700;
+const BOT_MAX_SPEED = 3400;
+const PUCK_MAX_SPEED = 2400;
 const PUCK_MIN_SERVE_SPEED = 520;
 const PUCK_MIN_LIVE_SPEED = 120;
-const WALL_RESTITUTION = 0.94;
-const PUCK_RESTITUTION = 0.85;
-const MALLET_RESTITUTION = 0.80;
-const MALLET_STRIKE_TRANSFER = 0.62;
-const MALLET_HIT_COOLDOWN_MS = 45;
-const CONTACT_SEPARATION = 0.12;
-const HARD_CONTACT_SEPARATION = 1.0;
-const CONTACT_SLOP = 0.04;
+const WALL_RESTITUTION = 0.91;
+const PUCK_RESTITUTION = 0.78;
+const MALLET_RESTITUTION = 0.72;
+const MALLET_STRIKE_TRANSFER = 0.5;
+const MALLET_HIT_COOLDOWN_MS = 68;
+const CONTACT_SEPARATION = 0.2;
+const HARD_CONTACT_SEPARATION = 1.4;
+const CONTACT_SLOP = 0.12;
 const STATIC_PUCK_SPEED = 70;
-const STATIC_STRIKE_MIN_SPEED = 520;
-const STATIC_SWEEP_MIN_SPEED = 460;
-const EDGE_BLOCK_RESPONSE_SPEED = 48;
-const STRONG_STRIKE_MIN_SPEED = 180;
-const STRIKE_ESCAPE_TRANSFER = 0.42;
-const PUCK_SUBSTEPS = 18;
-const IMMEDIATE_HIT_STATE_GAP_MS = 4;
-const INPUT_STATE_GAP_MS = 6;
-const MALLET_RELEASE_LOCK_MS = 48;
-const FRICTION_PER_SECOND = 0.991;
+const STATIC_STRIKE_MIN_SPEED = 440;
+const STATIC_SWEEP_MIN_SPEED = 380;
+const EDGE_BLOCK_RESPONSE_SPEED = 36;
+const STRONG_STRIKE_MIN_SPEED = 160;
+const STRIKE_ESCAPE_TRANSFER = 0.34;
+const PUCK_SUBSTEPS = 14;
+const IMMEDIATE_HIT_STATE_GAP_MS = 6;
+const INPUT_STATE_GAP_MS = 8;
+const MALLET_RELEASE_LOCK_MS = 72;
+const MALLET_DIRECT_INPUT_LOCK_MS = 38;
+const FRICTION_PER_SECOND = 0.985;
+const PUCK_LINEAR_FRICTION = 18;
+const PUCK_STOP_SPEED = 16;
+const PUCK_INERTIA = {
+  frictionPerSecond: FRICTION_PER_SECOND,
+  linearFriction: PUCK_LINEAR_FRICTION,
+  stopSpeed: PUCK_STOP_SPEED
+};
 const STUCK_SPEED = 95;
 const STUCK_SECONDS = 0.38;
 const RECONNECT_GRACE_MS = 180_000;
@@ -790,10 +802,17 @@ function updateInput(client, message) {
   }
   const previousX = mallet.x;
   const previousY = mallet.y;
-  const dx = constrained.x - previousX;
-  const dy = constrained.y - previousY;
   const elapsed = mallet.lastInputAt ? (now - mallet.lastInputAt) / 1000 : 1 / PHYSICS_HZ;
-  const inputDt = clamp(elapsed, 1 / 240, 1 / 24);
+  const inputDt = clamp(elapsed, 1 / 300, 1 / 24);
+  const limited = limitPointStep(
+    previousX,
+    previousY,
+    constrained.x,
+    constrained.y,
+    HUMAN_MALLET_MAX_SPEED * inputDt
+  );
+  const dx = limited.x - previousX;
+  const dy = limited.y - previousY;
   const speed = Math.hypot(dx, dy) / inputDt;
   const velocityScale = speed > HUMAN_MALLET_MAX_SPEED ? HUMAN_MALLET_MAX_SPEED / speed : 1;
   const baseVx = (dx / inputDt) * velocityScale;
@@ -809,23 +828,23 @@ function updateInput(client, message) {
       room,
       mallet,
       playerIndex,
-      constrained.x,
-      constrained.y,
+      limited.x,
+      limited.y,
       inputDt,
       now,
       baseVx,
       baseVy
     );
   } else {
-    mallet.x = constrained.x;
-    mallet.y = constrained.y;
+    mallet.x = limited.x;
+    mallet.y = limited.y;
   }
   mallet.targetX = constrained.x;
   mallet.targetY = constrained.y;
   mallet.vx = baseVx;
   mallet.vy = baseVy;
   mallet.lastInputAt = now;
-  mallet.directInputUntil = now + 90;
+  mallet.directInputUntil = now + MALLET_DIRECT_INPUT_LOCK_MS;
   client.lastInputSeq = Number(message.inputSeq) || client.lastInputSeq || 0;
 
   room.updatedAt = now;
@@ -953,8 +972,7 @@ function stepPucks(room, dt) {
   for (const puck of state.pucks) {
     puck.prevX = puck.x;
     puck.prevY = puck.y;
-    puck.vx *= Math.pow(FRICTION_PER_SECOND, dt);
-    puck.vy *= Math.pow(FRICTION_PER_SECOND, dt);
+    applyPuckInertia(puck, PUCK_INERTIA, dt);
 
     puck.x += puck.vx * dt;
     puck.y += puck.vy * dt;
@@ -1348,7 +1366,7 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
 
   if (sweptHit && malletSpeed > 320) {
     const puckTravelAlongMove = puck.vx * moveX + puck.vy * moveY;
-    const minimumTravel = Math.max(220, malletSpeed * 0.24);
+    const minimumTravel = Math.max(180, malletSpeed * 0.2);
     if (puckTravelAlongMove < minimumTravel) {
       const carry = minimumTravel - puckTravelAlongMove;
       puck.vx += moveX * carry;
@@ -1365,7 +1383,7 @@ function collidePuckWithMallet(room, puck, mallet, malletIndex, dt) {
     }
 
     const puckMoveSpeed = puck.vx * moveX + puck.vy * moveY;
-    const targetMoveSpeed = Math.max(STATIC_SWEEP_MIN_SPEED, malletSpeed * 0.18);
+    const targetMoveSpeed = Math.max(STATIC_SWEEP_MIN_SPEED, malletSpeed * 0.14);
     if (puckMoveSpeed < targetMoveSpeed) {
       const carry = targetMoveSpeed - puckMoveSpeed;
       puck.vx += moveX * carry;
@@ -1551,17 +1569,17 @@ function updateBot(room) {
   const goalLeft = TABLE.width / 2 - TABLE.goalWidth / 2 + TABLE.malletRadius * 0.32;
   const goalRight = TABLE.width / 2 + TABLE.goalWidth / 2 - TABLE.malletRadius * 0.32;
   let target = { x: defensiveX, y: defensiveY };
-  let speed = brain.mode === "ambush" ? BOT_MAX_SPEED : brain.mode === "bait" ? 2550 : 3550;
+  let speed = brain.mode === "ambush" ? BOT_MAX_SPEED : brain.mode === "bait" ? 2100 : 2850;
 
   const servePuck = room.state.pucks.find(
     (puck) => puck.y < TABLE.height / 2 && Math.hypot(puck.vx, puck.vy) < 8
   );
   if (servePuck) {
-    const windup = Math.sin(now / 180) * (brain.mode === "ambush" ? 42 : 20);
+    const windup = Math.sin(now / 220) * (brain.mode === "ambush" ? 28 : 14);
     const fakePause = brain.mode === "bait" && now < brain.nextDecisionAt - 220;
-    mallet.maxSpeed = fakePause ? 1850 : brain.mode === "ambush" ? BOT_MAX_SPEED : 3800;
+    mallet.maxSpeed = fakePause ? 1600 : brain.mode === "ambush" ? BOT_MAX_SPEED : 3000;
     mallet.targetX = clamp(
-      servePuck.x + windup + brain.side * (brain.mode === "ambush" ? 26 : 12),
+      servePuck.x + windup + brain.side * (brain.mode === "ambush" ? 18 : 8),
       TABLE.malletRadius,
       TABLE.width - TABLE.malletRadius
     );
@@ -1617,7 +1635,7 @@ function updateBot(room) {
           TABLE.height * 0.24
         )
       };
-      speed = clamp(3900 + puckSpeed * 0.78, 4200, BOT_MAX_SPEED);
+      speed = clamp(2900 + puckSpeed * 0.62, 3000, BOT_MAX_SPEED);
     } else {
       const attackPlan = chooseBotAttackTarget(puck, opponent, brain, now, interceptBias, surpriseLane);
       target = attackPlan.target;
@@ -1635,8 +1653,8 @@ function updateBot(room) {
     };
   }
 
-  target.x += Math.sin(now / brain.tempo + brain.side) * (brain.mode === "ambush" ? 18 : 8);
-  target.y += Math.cos(now / (brain.tempo * 1.22)) * (brain.mode === "bait" ? 8 : 4);
+  target.x += Math.sin(now / brain.tempo + brain.side) * (brain.mode === "ambush" ? 12 : 5);
+  target.y += Math.cos(now / (brain.tempo * 1.22)) * (brain.mode === "bait" ? 5 : 3);
   target.x = clamp(target.x, TABLE.malletRadius, TABLE.width - TABLE.malletRadius);
   target.y = clamp(target.y, TABLE.malletRadius, TABLE.height / 2 - TABLE.malletRadius - 8);
   mallet.maxSpeed = speed;
@@ -1651,8 +1669,8 @@ function updateBotBrain(room, now) {
     room.botBrain = {
       mode,
       side: Math.random() > 0.5 ? 1 : -1,
-      tempo: 140 + Math.random() * 360,
-      nextDecisionAt: now + (mode === "ambush" ? 300 : 520) + Math.random() * (mode === "ambush" ? 360 : 760)
+      tempo: 180 + Math.random() * 420,
+      nextDecisionAt: now + (mode === "ambush" ? 420 : 680) + Math.random() * (mode === "ambush" ? 420 : 860)
     };
   }
   return room.botBrain;
@@ -1697,11 +1715,11 @@ function chooseBotAttackTarget(puck, opponent, brain, now, interceptBias, surpri
     },
     speedBase:
       brain.mode === "ambush"
-        ? 4050
+        ? 3100
         : brain.mode === "bait"
-          ? 2350
-          : 3200,
-    speedScale: brain.mode === "ambush" ? 0.76 : brain.mode === "bait" ? 0.22 : 0.5
+          ? 2050
+          : 2650,
+    speedScale: brain.mode === "ambush" ? 0.55 : brain.mode === "bait" ? 0.18 : 0.38
   };
 }
 

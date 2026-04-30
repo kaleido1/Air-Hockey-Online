@@ -9,6 +9,51 @@ export function getServeAnchorY(table, server) {
   return server === 0 ? table.height * 0.61 : table.height * 0.39;
 }
 
+export function applyPuckInertia(puck, config = {}, dt = 0) {
+  const elapsed = Math.max(0, dt);
+  const speed = Math.hypot(puck.vx || 0, puck.vy || 0);
+  if (speed <= 0.001) {
+    puck.vx = 0;
+    puck.vy = 0;
+    return;
+  }
+
+  const frictionPerSecond = clamp(
+    Number.isFinite(config.frictionPerSecond) ? config.frictionPerSecond : 1,
+    0,
+    1
+  );
+  const linearFriction = Math.max(0, config.linearFriction || 0);
+  const stopSpeed = Math.max(0, config.stopSpeed || 0);
+  const dampedSpeed = speed * Math.pow(frictionPerSecond, elapsed);
+  const nextSpeed = Math.max(0, dampedSpeed - linearFriction * elapsed);
+
+  if (nextSpeed <= stopSpeed) {
+    puck.vx = 0;
+    puck.vy = 0;
+    return;
+  }
+
+  const scale = nextSpeed / speed;
+  puck.vx *= scale;
+  puck.vy *= scale;
+}
+
+export function limitPointStep(fromX, fromY, toX, toY, maxDistance) {
+  const dx = toX - fromX;
+  const dy = toY - fromY;
+  const distance = Math.hypot(dx, dy);
+  const limit = Math.max(0, maxDistance);
+  if (distance <= limit || distance <= 0.001) {
+    return { x: toX, y: toY };
+  }
+  const scale = limit / distance;
+  return {
+    x: fromX + dx * scale,
+    y: fromY + dy * scale
+  };
+}
+
 export function chooseSafeServePosition(table, config, state, preferredX, preferredY, server) {
   const r = table.puckRadius;
   const top = server === 0 ? table.height / 2 + r + 12 : r + 12;
