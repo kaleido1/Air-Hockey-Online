@@ -283,8 +283,8 @@ let puckSprite = null;
 let canvasMetrics = null;
 let currentCursor = "";
 const outgoingMalletTargets = new Map();
-let serverTickHz = Number(window.AIR_HOCKEY_PHYSICS_HZ) || 240;
-let serverSnapshotHz = Number(window.AIR_HOCKEY_SNAPSHOT_HZ) || 240;
+let serverTickHz = Number(window.AIR_HOCKEY_PHYSICS_HZ) || 60;
+let serverSnapshotHz = Number(window.AIR_HOCKEY_SNAPSHOT_HZ) || 60;
 const LOCAL_HUMAN_MALLET_BASE_SPEED = 4200;
 const LOCAL_HUMAN_MALLET_INPUT_SPEED_SCALE = 1.15;
 const LOCAL_HUMAN_MALLET_SPEED_HOLD_MS = 120;
@@ -650,8 +650,8 @@ function getWebSocketUrl() {
 function handleMessage(message) {
   switch (message.type) {
     case "hello":
-      serverTickHz = clamp(Math.round(Number(message.physicsHz) || serverTickHz), 240, 480);
-      serverSnapshotHz = clamp(Math.round(Number(message.snapshotHz) || serverSnapshotHz), 120, Math.min(240, serverTickHz));
+      serverTickHz = clamp(Math.round(Number(message.physicsHz) || serverTickHz), 60, 480);
+      serverSnapshotHz = clamp(Math.round(Number(message.snapshotHz) || serverSnapshotHz), 60, Math.min(240, serverTickHz));
       if (pendingRoomFromUrl) {
         send({ type: "join", code: pendingRoomFromUrl });
         pendingRoomFromUrl = "";

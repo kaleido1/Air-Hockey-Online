@@ -37,8 +37,8 @@ const TABLE = {
   firstTo: 7
 };
 
-const PHYSICS_HZ = readTickHz("AIR_HOCKEY_PHYSICS_HZ", 240, 240, 480);
-const SNAPSHOT_HZ = readTickHz("AIR_HOCKEY_SNAPSHOT_HZ", 240, 120, Math.min(240, PHYSICS_HZ));
+const PHYSICS_HZ = readTickHz("AIR_HOCKEY_PHYSICS_HZ", 60, 60, 480);
+const SNAPSHOT_HZ = readTickHz("AIR_HOCKEY_SNAPSHOT_HZ", 60, 60, Math.min(240, PHYSICS_HZ));
 const DT = 1 / PHYSICS_HZ;
 const HUMAN_MALLET_BASE_SPEED = 4200;
 const HUMAN_MALLET_INPUT_SPEED_SCALE = 1.15;
@@ -3256,8 +3256,8 @@ export function runTickConfigSelfTest() {
     physicsHz: PHYSICS_HZ,
     snapshotHz: SNAPSHOT_HZ,
     passed:
-      PHYSICS_HZ === 240 &&
-      SNAPSHOT_HZ === 240
+      PHYSICS_HZ === 60 &&
+      SNAPSHOT_HZ === 60
   };
 }
 
