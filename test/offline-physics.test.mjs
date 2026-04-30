@@ -29,7 +29,7 @@ const CONFIG = {
   malletTransfer: 0.56,
   rehitSuppressionMs: 68,
   restitution: 0.72,
-  stopSpeed: 16
+  stopSpeed: 0
 };
 const PRE_OFFENSE_PUCK_MAX_SPEED = 2400;
 
@@ -203,13 +203,15 @@ function testPuckInertiaDampsWithoutSnappingFastPuck() {
   assert.equal(puck.vy, 0);
 }
 
-function testPuckInertiaSettlesTinyJitter() {
+function testPuckInertiaKeepsSlowPuckMoving() {
   const puck = { vx: 9, vy: 5 };
+  const before = Math.hypot(puck.vx, puck.vy);
 
   applyPuckInertia(puck, CONFIG, 1 / 240);
 
-  assert.equal(puck.vx, 0);
-  assert.equal(puck.vy, 0);
+  const after = Math.hypot(puck.vx, puck.vy);
+  assert.ok(after > 0, "slow pucks should not be hard-stopped");
+  assert.ok(after < before, "surface drag should still slow low-speed pucks");
 }
 
 function testMalletStepLimiterCapsInputJump() {
@@ -229,12 +231,30 @@ const tests = [
   testFastPuckCannotTunnelThroughStationaryMallet,
   testGoalScoredWhenPuckCrossesLineBetweenFrames,
   testPuckInertiaDampsWithoutSnappingFastPuck,
-  testPuckInertiaSettlesTinyJitter,
+  testPuckInertiaKeepsSlowPuckMoving,
   testMalletStepLimiterCapsInputJump
 ];
 
-for (const test of tests) {
-  test();
+process.env.AIR_HOCKEY_NO_LISTEN = "1";
+const {
+  runActiveDisconnectSelfTest,
+  runSlowPuckNoHardStopSelfTest
+} = await import("../server.mjs");
+
+function testActiveDisconnectClosesRemoteRoom() {
+  const result = runActiveDisconnectSelfTest();
+  assert.ok(result.passed, JSON.stringify(result));
 }
 
-console.log(`offline physics tests passed: ${tests.length}`);
+function testServerSlowPuckIsNotHardStopped() {
+  const result = runSlowPuckNoHardStopSelfTest();
+  assert.ok(result.passed, JSON.stringify(result));
+}
+
+tests.push(testActiveDisconnectClosesRemoteRoom, testServerSlowPuckIsNotHardStopped);
+
+for (const test of tests) {
+  await test();
+}
+
+console.log(`physics tests passed: ${tests.length}`);

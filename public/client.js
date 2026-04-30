@@ -283,6 +283,7 @@ let puckSprite = null;
 let canvasMetrics = null;
 let currentCursor = "";
 const outgoingMalletTargets = new Map();
+const localMalletDisplayStates = new Map();
 let serverTickHz = Number(window.AIR_HOCKEY_PHYSICS_HZ) || 360;
 let serverSnapshotHz = Number(window.AIR_HOCKEY_SNAPSHOT_HZ) || 180;
 const LOCAL_HUMAN_MALLET_BASE_SPEED = 4200;
@@ -296,7 +297,7 @@ const LOCAL_BLOCK_RELEASE_SPEED = 165;
 const LOCAL_WALL_RESTITUTION = 0.91;
 const LOCAL_FRICTION_PER_SECOND = 0.985;
 const LOCAL_LINEAR_FRICTION = 18;
-const LOCAL_PUCK_STOP_SPEED = 16;
+const LOCAL_PUCK_STOP_SPEED = 0;
 const LOCAL_STRONG_SWEEP_TANGENTIAL_TRANSFER = 0.08;
 const LOCAL_STRONG_SWEEP_TANGENTIAL_MAX = 180;
 const OFFLINE_PHYSICS_HZ = 240;
@@ -310,6 +311,10 @@ let lastAckInputSeq = 0;
 let lastLocalHitFxAt = 0;
 let lastServerTickExtended = null;
 let interpolationDelayMs = 16;
+const SNAPSHOT_BUFFER_LIMIT = 8;
+const LOCAL_MALLET_PENDING_TTL_MS = 360;
+const LOCAL_MALLET_ACK_BLEND_MS = 140;
+const LOCAL_MALLET_DISPLAY_EPSILON = 0.35;
 
 applyLanguage();
 startRefreshRateSampling();
@@ -1100,6 +1105,7 @@ function startOfflineGame(mode, count = puckCount) {
   previousState = null;
   stateSnapshots.length = 0;
   outgoingMalletTargets.clear();
+  localMalletDisplayStates.clear();
   puckCorrections.clear();
   lastPhase = "countdown";
   phaseChangedAt = performance.now();
@@ -1764,6 +1770,7 @@ function clearRoom() {
   stateSnapshots.length = 0;
   roomPlayers = null;
   outgoingMalletTargets.clear();
+  localMalletDisplayStates.clear();
   lastInputPointByPlayer.fill(null);
   puckCorrections.clear();
   remoteMalletSamples.forEach((samples) => samples.splice(0));
@@ -1846,7 +1853,9 @@ function sendPointerFromPoint(point, force, targetIndex) {
     targetY: constrained.y,
     inputSpeed,
     inputSeq,
-    inputAt: now
+    inputAt: now,
+    updatedAt: now,
+    expiresAt: now + clamp(measuredRttMs * 2 + LOCAL_MALLET_PENDING_TTL_MS, LOCAL_MALLET_PENDING_TTL_MS, 720)
   });
   sendRealtime(
     encodeInputPacket({
@@ -2250,14 +2259,14 @@ function rememberStateSnapshot(message) {
     receivedAt: performance.now(),
     state: cloneSnapshotState(message.state)
   });
-  while (stateSnapshots.length > 5) stateSnapshots.shift();
+  while (stateSnapshots.length > SNAPSHOT_BUFFER_LIMIT) stateSnapshots.shift();
   if (stateSnapshots.length >= 2) {
     const previous = stateSnapshots[stateSnapshots.length - 2];
     const latest = stateSnapshots[stateSnapshots.length - 1];
     const spacingMs = latest.serverTime - previous.serverTime;
     const arrivalJitter = Math.abs((latest.receivedAt - previous.receivedAt) - spacingMs);
-    const targetDelay = clamp(spacingMs * 1.35 + arrivalJitter * 0.55 + measuredRttMs * 0.04, 10, 34);
-    interpolationDelayMs = lerp(interpolationDelayMs, targetDelay, 0.28);
+    const targetDelay = clamp(spacingMs * 1.8 + arrivalJitter * 0.75 + measuredRttMs * 0.06, 16, 52);
+    interpolationDelayMs = lerp(interpolationDelayMs, targetDelay, 0.18);
   }
 }
 
@@ -2330,6 +2339,22 @@ function displayPuck(puck) {
   return puck;
 }
 
+function isControlledMalletIndex(index) {
+  if (offlineGame?.mode === "local") return index === 0 || index === 1;
+  if (offlineGame?.mode === "bot") return index === 0;
+  return index === playerIndex;
+}
+
+function shouldUseLocalMalletDisplay(index) {
+  return Boolean(
+    !offlineGame &&
+      roomCode &&
+      serverState &&
+      isControlledMalletIndex(index) &&
+      ["playing", "countdown", "point"].includes(serverState.phase)
+  );
+}
+
 function isInputSeqAcknowledged(ackInputSeq, inputSeq) {
   const ack = ackInputSeq & 0xffff;
   const input = inputSeq & 0xffff;
@@ -2338,8 +2363,19 @@ function isInputSeqAcknowledged(ackInputSeq, inputSeq) {
 }
 
 function pruneAcknowledgedOutgoingTargets(ackInputSeq) {
+  const now = performance.now();
   for (const [index, target] of outgoingMalletTargets) {
     if (!target?.inputSeq || isInputSeqAcknowledged(ackInputSeq, target.inputSeq)) {
+      target.acknowledgedAt ||= now;
+      target.expiresAt = now + LOCAL_MALLET_ACK_BLEND_MS;
+    }
+  }
+  cleanupOutgoingMalletTargets(now);
+}
+
+function cleanupOutgoingMalletTargets(now = performance.now()) {
+  for (const [index, target] of outgoingMalletTargets) {
+    if (target?.expiresAt && now > target.expiresAt) {
       outgoingMalletTargets.delete(index);
     }
   }
@@ -2374,6 +2410,7 @@ function render(frameTime = performance.now()) {
     renderBudgetMs %= targetFrameMs;
   }
   if (offlineGame) stepOfflineGame(frameTime);
+  cleanupOutgoingMalletTargets(frameTime);
   const state = renderState() || demoState();
   const nextCursor = isActivePlay() ? "none" : "default";
   if (currentCursor !== nextCursor) {
@@ -3405,8 +3442,48 @@ function drawState(state) {
   ctx.restore();
 }
 
-function displayMallet(mallet) {
-  return mallet;
+function displayMallet(mallet, index) {
+  if (!shouldUseLocalMalletDisplay(index)) {
+    localMalletDisplayStates.delete(index);
+    return mallet;
+  }
+
+  const now = performance.now();
+  const target = outgoingMalletTargets.get(index);
+  const display = localMalletDisplayStates.get(index);
+
+  if (!target) {
+    if (!display) return mallet;
+    const x = lerp(display.x, mallet.x, 0.32);
+    const y = lerp(display.y, mallet.y, 0.32);
+    if (Math.hypot(x - mallet.x, y - mallet.y) <= LOCAL_MALLET_DISPLAY_EPSILON) {
+      localMalletDisplayStates.delete(index);
+      return mallet;
+    }
+    localMalletDisplayStates.set(index, { x, y, updatedAt: now });
+    return { ...mallet, x, y };
+  }
+
+  const targetX = Number.isFinite(target.x) ? target.x : Number.isFinite(target.targetX) ? target.targetX : mallet.x;
+  const targetY = Number.isFinite(target.y) ? target.y : Number.isFinite(target.targetY) ? target.targetY : mallet.y;
+  const ackBlend = target.acknowledgedAt
+    ? clamp((now - target.acknowledgedAt) / LOCAL_MALLET_ACK_BLEND_MS, 0, 1)
+    : 0;
+  const desiredX = lerp(targetX, mallet.x, ackBlend);
+  const desiredY = lerp(targetY, mallet.y, ackBlend);
+  const previous = display || mallet;
+  const alpha = target.acknowledgedAt ? 0.44 : 0.76;
+  const x = lerp(previous.x, desiredX, alpha);
+  const y = lerp(previous.y, desiredY, alpha);
+
+  localMalletDisplayStates.set(index, { x, y, updatedAt: now });
+  return {
+    ...mallet,
+    x,
+    y,
+    vx: Number.isFinite(target.vx) ? target.vx : mallet.vx,
+    vy: Number.isFinite(target.vy) ? target.vy : mallet.vy
+  };
 }
 
 function drawCanvasScores(state) {

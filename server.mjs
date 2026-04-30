@@ -75,7 +75,7 @@ const INPUT_STATE_GAP_MS = 8;
 const MALLET_RELEASE_LOCK_MS = 72;
 const FRICTION_PER_SECOND = 0.985;
 const PUCK_LINEAR_FRICTION = 18;
-const PUCK_STOP_SPEED = 16;
+const PUCK_STOP_SPEED = 0;
 const PUCK_INERTIA = {
   frictionPerSecond: FRICTION_PER_SECOND,
   linearFriction: PUCK_LINEAR_FRICTION,
@@ -1037,6 +1037,35 @@ function reserveDisconnectedPlayer(client) {
   return true;
 }
 
+function shouldCloseRoomOnActiveDisconnect(room) {
+  return Boolean(
+    room &&
+      !room.settings.local &&
+      !room.settings.bot &&
+      ["countdown", "playing", "paused", "point"].includes(room.state.phase)
+  );
+}
+
+function closeRoomForDisconnectedPlayer(room, disconnectedClient) {
+  const notified = new Set();
+  for (const player of room.players) {
+    if (!player || player.bot || player.id === disconnectedClient.id || notified.has(player.id)) continue;
+    const client = clients.get(player.id);
+    if (!client) continue;
+    notified.add(player.id);
+    client.roomCode = null;
+    client.playerIndex = null;
+    send(client, {
+      type: "notice",
+      message: "Opponent left the room"
+    });
+  }
+
+  disconnectedClient.roomCode = null;
+  disconnectedClient.playerIndex = null;
+  rooms.delete(room.code);
+}
+
 function leaveRoom(client, notify = true) {
   removeFromQueue(client);
 
@@ -1092,8 +1121,11 @@ function leaveRoom(client, notify = true) {
 
 function disconnect(client) {
   if (!clients.has(client.id)) return;
+  const room = currentRoom(client);
   clients.delete(client.id);
-  if (!reserveDisconnectedPlayer(client)) {
+  if (shouldCloseRoomOnActiveDisconnect(room)) {
+    closeRoomForDisconnectedPlayer(room, client);
+  } else if (!reserveDisconnectedPlayer(client)) {
     leaveRoom(client, true);
   }
   if (!client.socket.destroyed) client.socket.destroy();
@@ -2622,6 +2654,119 @@ function normalizePuckCount(value) {
   return Number(value) === 2 ? 2 : 1;
 }
 
+function makeSelfTestSocket() {
+  return {
+    writable: true,
+    destroyed: false,
+    messages: [],
+    write(frame) {
+      const message = decodeSelfTestTextFrame(frame);
+      if (message) this.messages.push(message);
+      return true;
+    },
+    destroy() {
+      this.destroyed = true;
+      this.writable = false;
+    },
+    end() {
+      this.destroy();
+    }
+  };
+}
+
+function decodeSelfTestTextFrame(frame) {
+  const opcode = frame[0] & 0x0f;
+  if (opcode !== 0x1) return null;
+
+  let length = frame[1] & 0x7f;
+  let offset = 2;
+  if (length === 126) {
+    length = frame.readUInt16BE(offset);
+    offset += 2;
+  } else if (length === 127) {
+    length = Number(frame.readBigUInt64BE(offset));
+    offset += 8;
+  }
+
+  try {
+    return JSON.parse(frame.subarray(offset, offset + length).toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function makeSelfTestClient(id) {
+  return {
+    id,
+    socket: makeSelfTestSocket(),
+    buffer: Buffer.alloc(0),
+    roomCode: null,
+    playerIndex: null,
+    playerKey: id,
+    queued: false,
+    lastInputSeq: 0,
+    lastSnapshotAt: 0,
+    snapshotIntervalMs: 1000 / SNAPSHOT_HZ,
+    displayRefreshHz: SNAPSHOT_HZ,
+    networkKey: "self-test-network"
+  };
+}
+
+export function runActiveDisconnectSelfTest() {
+  const suffix = crypto.randomBytes(4).toString("hex");
+  const clientA = makeSelfTestClient(`disconnect-a-${suffix}`);
+  const clientB = makeSelfTestClient(`disconnect-b-${suffix}`);
+  let room = null;
+
+  try {
+    clients.set(clientA.id, clientA);
+    clients.set(clientB.id, clientB);
+    room = makeRoom({ puckCount: 1, lan: true });
+    addPlayer(room, clientA, 0);
+    addPlayer(room, clientB, 1);
+    startRoom(room);
+    room.state.phase = "playing";
+
+    const code = room.code;
+    disconnect(clientA);
+
+    const noticeSent = clientB.socket.messages.some(
+      (message) => message.type === "notice" && message.message === "Opponent left the room"
+    );
+    const roomRemoved = !rooms.has(code);
+    const remainingCleared = clientB.roomCode === null && clientB.playerIndex === null;
+    const disconnectedRemoved = !clients.has(clientA.id);
+    const disconnectedCleared = clientA.roomCode === null && clientA.playerIndex === null;
+
+    return {
+      noticeSent,
+      roomRemoved,
+      remainingCleared,
+      disconnectedRemoved,
+      disconnectedCleared,
+      passed: noticeSent && roomRemoved && remainingCleared && disconnectedRemoved && disconnectedCleared
+    };
+  } finally {
+    clients.delete(clientA.id);
+    clients.delete(clientB.id);
+    if (room) rooms.delete(room.code);
+  }
+}
+
+export function runSlowPuckNoHardStopSelfTest() {
+  const puck = { vx: 9, vy: 5 };
+  stopVerySlowPuck(puck);
+  const speedAfterStopHook = Math.hypot(puck.vx, puck.vy);
+  applyPuckInertia(puck, PUCK_INERTIA, 1 / PHYSICS_HZ);
+  const speedAfterInertia = Math.hypot(puck.vx, puck.vy);
+
+  return {
+    speedAfterStopHook,
+    speedAfterInertia,
+    passed: speedAfterStopHook > 0 && speedAfterInertia > 0 && speedAfterInertia < speedAfterStopHook
+  };
+}
+
 export function runPhysicsSelfTest() {
   const room = makeRoom({ puckCount: 1, local: true });
   room.players = [null, null];
@@ -3357,8 +3502,7 @@ function constrainMalletAwayFromPucks(index, x, y, pucks) {
 
 function stopVerySlowPuck(puck) {
   const speed = Math.hypot(puck.vx, puck.vy);
-  if (speed > 0 && speed < PUCK_MIN_LIVE_SPEED * 0.3) {
-    // Let very slow pucks come to rest naturally
+  if (speed > 0 && speed < 0.001) {
     puck.vx = 0;
     puck.vy = 0;
   }

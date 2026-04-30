@@ -24,11 +24,10 @@ export function applyPuckInertia(puck, config = {}, dt = 0) {
     1
   );
   const linearFriction = Math.max(0, config.linearFriction || 0);
-  const stopSpeed = Math.max(0, config.stopSpeed || 0);
   const dampedSpeed = speed * Math.pow(frictionPerSecond, elapsed);
   const nextSpeed = Math.max(0, dampedSpeed - linearFriction * elapsed);
 
-  if (nextSpeed <= stopSpeed) {
+  if (nextSpeed <= 0.001) {
     puck.vx = 0;
     puck.vy = 0;
     return;
