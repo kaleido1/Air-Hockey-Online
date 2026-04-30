@@ -282,16 +282,11 @@ let malletSprite = null;
 let puckSprite = null;
 let canvasMetrics = null;
 let currentCursor = "";
-const predictedMallets = new Map();
-const SERVER_TICK_HZ = 240;
+const outgoingMalletTargets = new Map();
+let serverTickHz = Number(window.AIR_HOCKEY_PHYSICS_HZ) || 360;
+let serverSnapshotHz = Number(window.AIR_HOCKEY_SNAPSHOT_HZ) || 180;
 const LOCAL_HUMAN_MALLET_MAX_SPEED = 3800;
-const LOCAL_PREDICTION_WINDOW_MS = 260;
-const LOCAL_SAME_DEVICE_PREDICTION_WINDOW_MS = 900;
-const LOCAL_UNACKED_PREDICTION_GRACE_MS = 320;
-const LOCAL_PREDICTION_RECONCILE_DISTANCE = 24;
-const LOCAL_PREDICTION_MAX_STEP = 1 / 240;
 const LOCAL_REHIT_SUPPRESSION_MS = 68;
-const LOCAL_BLOCK_INPUT_GRACE_MS = 70;
 const LOCAL_CONTACT_SEPARATION = 0.2;
 const LOCAL_HARD_CONTACT_SEPARATION = 1.4;
 const LOCAL_CONTACT_SLOP = 0.7;
@@ -308,10 +303,7 @@ const OFFLINE_DT = 1 / OFFLINE_PHYSICS_HZ;
 const OFFLINE_MAX_FRAME_MS = 60;
 const OFFLINE_BOT_MIN_SPEED = 1700;
 const OFFLINE_BOT_MAX_SPEED = 3400;
-const ENABLE_ONLINE_PUCK_PREDICTION = false;
 const puckCorrections = new Map();
-const localPredictedPucks = new Map();
-const recentPuckPredictionAt = new Map();
 let nextInputSeq = 1;
 let lastAckInputSeq = 0;
 let lastLocalHitFxAt = 0;
@@ -655,6 +647,8 @@ function getWebSocketUrl() {
 function handleMessage(message) {
   switch (message.type) {
     case "hello":
+      serverTickHz = clamp(Math.round(Number(message.physicsHz) || serverTickHz), 240, 480);
+      serverSnapshotHz = clamp(Math.round(Number(message.snapshotHz) || serverSnapshotHz), 120, Math.min(240, serverTickHz));
       if (pendingRoomFromUrl) {
         send({ type: "join", code: pendingRoomFromUrl });
         pendingRoomFromUrl = "";
@@ -738,6 +732,7 @@ function applyRealtimeState(message) {
   serverState = message.state;
   lastStateReceivedAt = performance.now();
   lastAckInputSeq = Math.max(lastAckInputSeq, message.ackInputSeq || 0);
+  pruneAcknowledgedOutgoingTargets(lastAckInputSeq);
   rememberRemoteMalletSamples(message.state);
   rememberStateSnapshot(message);
   if (serverState.phase !== lastPhase) {
@@ -1095,9 +1090,8 @@ function startOfflineGame(mode, count = puckCount) {
   serverState = state;
   previousState = null;
   stateSnapshots.length = 0;
-  predictedMallets.clear();
+  outgoingMalletTargets.clear();
   puckCorrections.clear();
-  localPredictedPucks.clear();
   lastPhase = "countdown";
   phaseChangedAt = performance.now();
   lastStateReceivedAt = performance.now();
@@ -1248,7 +1242,7 @@ function updateOfflineMalletInput(index, point, previousInputAt, now) {
   mallet.y = limited.y;
   mallet.vx = (limited.x - fromX) / inputDt;
   mallet.vy = (limited.y - fromY) / inputDt;
-  predictedMallets.set(index, {
+  outgoingMalletTargets.set(index, {
     x: mallet.x,
     y: mallet.y,
     vx: mallet.vx,
@@ -1331,7 +1325,7 @@ function resolveOfflineMalletSweep(index, fromX, fromY, toX, toY, inputDt, now) 
     puck.vx = exitX * strike + moveX * sweepKick + sweepX * 8;
     puck.vy = exitY * strike + moveY * sweepKick + sweepY * 8;
     addLocalTangentialSweep(puck, normalX, normalY, moveX, moveY, malletSpeed);
-    capLocalPredictedPuckSpeed(puck);
+    capLocalPuckSpeed(puck);
     puck.lastMalletHitIndex = index;
     puck.lastMalletHitAt = now;
     puck.hitSerial = ((puck.hitSerial || 0) + 1) & 0xff;
@@ -1419,7 +1413,7 @@ function moveOfflineControlledMallets(dt, now) {
     mallet.y = limited.y;
     mallet.vx = (limited.x - fromX) / dt;
     mallet.vy = (limited.y - fromY) / dt;
-    predictedMallets.set(index, {
+    outgoingMalletTargets.set(index, {
       x: mallet.x,
       y: mallet.y,
       vx: mallet.vx,
@@ -1447,7 +1441,7 @@ function stepOfflineMatterWorld(dt) {
     puck.prevX = puck.x;
     puck.prevY = puck.y;
     applyPuckInertia(puck, physicsConfig, dt);
-    capLocalPredictedPuckSpeed(puck);
+    capLocalPuckSpeed(puck);
     syncOfflinePuckBody(puck);
   }
 
@@ -1461,7 +1455,7 @@ function stepOfflineMatterWorld(dt) {
     puck.y = body.position.y;
     puck.vx = body.velocity.x * 60;
     puck.vy = body.velocity.y * 60;
-    capLocalPredictedPuckSpeed(puck);
+    capLocalPuckSpeed(puck);
     resolveOfflinePuckMalletContacts(puck, dt);
     const scorer = detectOfflineGoal(puck);
     if (scorer !== null) scored.push({ puck, scorer });
@@ -1493,7 +1487,7 @@ function resolveOfflinePuckMalletContacts(puck, dt) {
     puck.y = result.y;
     puck.vx = result.vx;
     puck.vy = result.vy;
-    capLocalPredictedPuckSpeed(puck);
+    capLocalPuckSpeed(puck);
     syncOfflinePuckBody(puck);
     playFx("hit", 0.34);
   }
@@ -1753,10 +1747,8 @@ function clearRoom() {
   lastStateReceivedAt = 0;
   stateSnapshots.length = 0;
   roomPlayers = null;
-  predictedMallets.clear();
+  outgoingMalletTargets.clear();
   puckCorrections.clear();
-  localPredictedPucks.clear();
-  recentPuckPredictionAt.clear();
   remoteMalletSamples.forEach((samples) => samples.splice(0));
   nextInputSeq = 1;
   lastAckInputSeq = 0;
@@ -1774,211 +1766,11 @@ function clearRoom() {
   history.replaceState(null, "", location.pathname);
 }
 
-function applyPuckCorrection(nextState, ackInputSeq = 0) {
-  if (!ENABLE_ONLINE_PUCK_PREDICTION) {
-    puckCorrections.clear();
-    localPredictedPucks.clear();
-    recentPuckPredictionAt.clear();
-    return;
-  }
-
-  if (nextState?.phase !== "playing" || !nextState?.pucks?.length || !serverState?.pucks?.length) {
-    puckCorrections.clear();
-    localPredictedPucks.clear();
-    return;
-  }
-
-  const now = performance.now();
-  const incoming = new Map(nextState.pucks.map((puck) => [puck.id, puck]));
-  for (const [id, correction] of puckCorrections.entries()) {
-    if (!incoming.has(id) || correction.expiresAt <= now) {
-      puckCorrections.delete(id);
-    }
-  }
-  for (const [id, prediction] of localPredictedPucks.entries()) {
-    if (!incoming.has(id) || prediction.expiresAt <= now) {
-      const authoritative = incoming.get(id);
-      if (authoritative && prediction.expiresAt <= now) {
-        const predicted = advanceLocalPuckPrediction(prediction, now);
-        startPuckCorrection(id, predicted.x, predicted.y, authoritative.x, authoritative.y, now);
-      }
-      localPredictedPucks.delete(id);
-    }
-  }
-
-  for (const puck of serverState.pucks) {
-    const authoritative = incoming.get(puck.id);
-    if (!authoritative) continue;
-    const prediction = localPredictedPucks.get(puck.id);
-    if (!prediction) continue;
-
-    const predicted = advanceLocalPuckPrediction(prediction, now);
-    if (shouldKeepLocalPuckPrediction(prediction, authoritative, ackInputSeq)) {
-      puckCorrections.delete(puck.id);
-      continue;
-    }
-
-    localPredictedPucks.delete(puck.id);
-    const distanceFromPrediction = Math.hypot(predicted.x - authoritative.x, predicted.y - authoritative.y);
-    if (distanceFromPrediction >= 4) {
-      startPuckCorrection(puck.id, predicted.x, predicted.y, authoritative.x, authoritative.y, now);
-    }
-  }
+function applyPuckCorrection() {
+  puckCorrections.clear();
 }
 
-function shouldKeepLocalPuckPrediction(prediction, authoritative, ackInputSeq = 0) {
-  if (!prediction) return false;
-
-  const now = performance.now();
-  const age = now - (prediction.startedAt || now);
-  const distance = Math.hypot((prediction.x || 0) - authoritative.x, (prediction.y || 0) - authoritative.y);
-  const authoritativeHitSerial = authoritative.hitSerial || 0;
-  if (authoritativeHitSerial && authoritativeHitSerial !== prediction.serverHitSerial) {
-    if (isControlledMalletIndex(authoritative.lastMalletHitIndex)) {
-      prediction.serverHitSerial = authoritativeHitSerial;
-      return distance <= LOCAL_PREDICTION_RECONCILE_DISTANCE && age <= LOCAL_PREDICTION_WINDOW_MS;
-    }
-    return false;
-  }
-
-  if (prediction.inputSeq && !isInputSeqAcknowledged(ackInputSeq, prediction.inputSeq)) {
-    return age <= LOCAL_UNACKED_PREDICTION_GRACE_MS;
-  }
-
-  if (distance > LOCAL_PREDICTION_RECONCILE_DISTANCE) return false;
-
-  return age <= LOCAL_PREDICTION_WINDOW_MS;
-}
-
-function startPuckCorrection(id, fromX, fromY, toX, toY, now = performance.now()) {
-  const distance = Math.hypot(fromX - toX, fromY - toY);
-  if (distance < 4) {
-    puckCorrections.delete(id);
-    return;
-  }
-  puckCorrections.set(id, {
-    fromX,
-    fromY,
-    toX,
-    toY,
-    startedAt: now,
-    expiresAt: now + correctionDurationForDistance(distance)
-  });
-}
-
-function correctionDurationForDistance(distance) {
-  return clamp(120 + distance * 2.1, 130, 280);
-}
-
-function isControlledMalletIndex(index) {
-  return controlledMalletIndices().includes(index);
-}
-
-function localPuckPredictionWindowMs() {
-  return isLocalGame() || roomSettings?.bot ? LOCAL_SAME_DEVICE_PREDICTION_WINDOW_MS : LOCAL_PREDICTION_WINDOW_MS;
-}
-
-function wasPuckPredictedRecently(id, now = performance.now()) {
-  const predictedAt = recentPuckPredictionAt.get(id);
-  return Boolean(predictedAt && now - predictedAt < LOCAL_REHIT_SUPPRESSION_MS);
-}
-
-function markPuckPredicted(id, now = performance.now()) {
-  recentPuckPredictionAt.set(id, now);
-}
-
-function advanceLocalPuckPrediction(prediction, now) {
-  const lastUpdatedAt = prediction.updatedAt || prediction.startedAt || now;
-  let remaining = clamp((now - lastUpdatedAt) / 1000, 0, 0.12);
-  const physicsConfig = offlinePhysicsConfig();
-  if (ensurePredictionMatterBody(prediction)) {
-    const MatterLib = window.Matter;
-    while (remaining > 0.000001) {
-      const dt = Math.min(remaining, LOCAL_PREDICTION_MAX_STEP);
-      const velocity = prediction.matterBody.velocity;
-      const puckVelocity = {
-        vx: velocity.x * 60,
-        vy: velocity.y * 60
-      };
-      applyPuckInertia(puckVelocity, physicsConfig, dt);
-      MatterLib.Body.setVelocity(prediction.matterBody, {
-        x: puckVelocity.vx / 60,
-        y: puckVelocity.vy / 60
-      });
-      MatterLib.Engine.update(prediction.matterEngine, dt * 1000);
-      remaining -= dt;
-    }
-    prediction.x = prediction.matterBody.position.x;
-    prediction.y = prediction.matterBody.position.y;
-    prediction.vx = prediction.matterBody.velocity.x * 60;
-    prediction.vy = prediction.matterBody.velocity.y * 60;
-    capLocalPredictedPuckSpeed(prediction);
-    MatterLib.Body.setVelocity(prediction.matterBody, {
-      x: (prediction.vx || 0) / 60,
-      y: (prediction.vy || 0) / 60
-    });
-    prediction.updatedAt = now;
-    return prediction;
-  }
-
-  while (remaining > 0.000001) {
-    const dt = Math.min(remaining, LOCAL_PREDICTION_MAX_STEP);
-    applyPuckInertia(prediction, physicsConfig, dt);
-    prediction.x += prediction.vx * dt;
-    prediction.y += prediction.vy * dt;
-    collideLocalPredictedPuckWithWalls(prediction);
-    capLocalPredictedPuckSpeed(prediction);
-    remaining -= dt;
-  }
-  prediction.updatedAt = now;
-  return prediction;
-}
-
-function ensurePredictionMatterBody(prediction) {
-  if (prediction.matterBody && prediction.matterEngine) return true;
-  const MatterLib = window.Matter;
-  if (!MatterLib?.Engine || !MatterLib?.Bodies || !MatterLib?.Composite || !MatterLib?.Body) return false;
-  const engine = MatterLib.Engine.create({ enableSleeping: false });
-  engine.gravity.y = 0;
-  engine.gravity.x = 0;
-  const body = MatterLib.Bodies.circle(prediction.x, prediction.y, TABLE.puckRadius, {
-    restitution: LOCAL_WALL_RESTITUTION,
-    friction: 0,
-    frictionStatic: 0,
-    frictionAir: 0,
-    label: "predicted-puck"
-  });
-  MatterLib.Body.setVelocity(body, { x: (prediction.vx || 0) / 60, y: (prediction.vy || 0) / 60 });
-  MatterLib.Composite.add(engine.world, [...createMatterWallBodies(MatterLib), body]);
-  prediction.matterEngine = engine;
-  prediction.matterBody = body;
-  return true;
-}
-
-function collideLocalPredictedPuckWithWalls(puck) {
-  const r = TABLE.puckRadius;
-  const goalLeft = TABLE.width / 2 - TABLE.goalWidth / 2;
-  const goalRight = TABLE.width / 2 + TABLE.goalWidth / 2;
-  const insideGoal = puck.x > goalLeft && puck.x < goalRight;
-
-  if (puck.x < r) {
-    puck.x = r;
-    puck.vx = Math.abs(puck.vx) * LOCAL_WALL_RESTITUTION;
-  } else if (puck.x > TABLE.width - r) {
-    puck.x = TABLE.width - r;
-    puck.vx = -Math.abs(puck.vx) * LOCAL_WALL_RESTITUTION;
-  }
-
-  if (puck.y < r && !insideGoal) {
-    puck.y = r;
-    puck.vy = Math.abs(puck.vy) * LOCAL_WALL_RESTITUTION;
-  } else if (puck.y > TABLE.height - r && !insideGoal) {
-    puck.y = TABLE.height - r;
-    puck.vy = -Math.abs(puck.vy) * LOCAL_WALL_RESTITUTION;
-  }
-}
-
-function capLocalPredictedPuckSpeed(puck) {
+function capLocalPuckSpeed(puck) {
   const speed = Math.hypot(puck.vx || 0, puck.vy || 0);
   if (speed <= LOCAL_PUCK_MAX_SPEED || speed <= 0.001) return;
   const scale = LOCAL_PUCK_MAX_SPEED / speed;
@@ -2000,7 +1792,7 @@ function sendRelativePointer(event, force, targetIndex) {
   if ((!roomCode && !offlineGame) || playerIndex === null) return;
   if (!event.movementX && !event.movementY && !force) return;
   const base =
-    predictedMallets.get(targetIndex) ||
+    outgoingMalletTargets.get(targetIndex) ||
     serverState?.mallets?.[targetIndex] || {
       x: TABLE.width / 2,
       y: getMalletStart(targetIndex).y
@@ -2019,7 +1811,7 @@ function sendPointerFromPoint(point, force, targetIndex) {
   if (!isActivePlay()) return;
   if ((!roomCode && !offlineGame) || playerIndex === null) return;
   const now = performance.now();
-  const inputIntervalMs = 1000 / SERVER_TICK_HZ;
+  const inputIntervalMs = 1000 / serverTickHz;
   const previousInputAt = lastInputAtByPlayer[targetIndex] || now - 1000 / 120;
   if (!force && now - lastInputAtByPlayer[targetIndex] < inputIntervalMs) return;
   lastInputAtByPlayer[targetIndex] = now;
@@ -2032,52 +1824,14 @@ function sendPointerFromPoint(point, force, targetIndex) {
   if (serverState?.phase !== "playing") {
     constrained = constrainMalletAwayFromPucks(targetIndex, constrained.x, constrained.y, serverState?.pucks || []);
   }
-  const previousPredicted = predictedMallets.get(targetIndex);
-  const fromX = previousPredicted?.x ?? serverState?.mallets?.[targetIndex]?.x ?? constrained.x;
-  const fromY = previousPredicted?.y ?? serverState?.mallets?.[targetIndex]?.y ?? constrained.y;
-  const predictedDt = clamp((now - previousInputAt) / 1000, 1 / 300, 1 / 24);
-  const limited = limitPointStep(
-    fromX,
-    fromY,
-    constrained.x,
-    constrained.y,
-    LOCAL_HUMAN_MALLET_MAX_SPEED * predictedDt
-  );
-  const guarded =
-    serverState?.phase === "playing"
-      ? guardPredictedMalletSweepAgainstPucks(fromX, fromY, limited.x, limited.y, serverState.pucks || [])
-      : { x: limited.x, y: limited.y, blocked: false };
-  const originalPredictedSpeed = Math.hypot(limited.x - fromX, limited.y - fromY) / predictedDt;
-  if (serverState?.mallets?.[targetIndex]) {
-    serverState.mallets[targetIndex].x = guarded.x;
-    serverState.mallets[targetIndex].y = guarded.y;
-  }
-  predictedMallets.set(targetIndex, {
-    x: guarded.x,
-    y: guarded.y,
-    vx: (guarded.x - fromX) / predictedDt,
-    vy: (guarded.y - fromY) / predictedDt,
-    prevX: fromX,
-    prevY: fromY,
+  outgoingMalletTargets.set(targetIndex, {
+    x: constrained.x,
+    y: constrained.y,
     targetX: constrained.x,
     targetY: constrained.y,
     inputSeq,
-    inputAt: now,
-    updatedAt: now,
-    expiresAt: performance.now() + 180
+    inputAt: now
   });
-  if (ENABLE_ONLINE_PUCK_PREDICTION) {
-    applyLocalStrikePrediction(
-      targetIndex,
-      fromX,
-      fromY,
-      guarded.x,
-      guarded.y,
-      now,
-      originalPredictedSpeed,
-      inputSeq
-    );
-  }
   sendRealtime(
     encodeInputPacket({
       inputSeq,
@@ -2087,148 +1841,6 @@ function sendPointerFromPoint(point, force, targetIndex) {
       y: constrained.y
     })
   );
-}
-
-function guardPredictedMalletSweepAgainstPucks(fromX, fromY, toX, toY, pucks = []) {
-  const sweepX = toX - fromX;
-  const sweepY = toY - fromY;
-  if (Math.hypot(sweepX, sweepY) <= 0.001 || !pucks.length) {
-    return { x: toX, y: toY, t: 1, blocked: false };
-  }
-
-  let earliest = 1;
-  const minDistance = TABLE.malletRadius + TABLE.puckRadius;
-  for (const puck of pucks) {
-    const relativeStartX = (puck.x || 0) - fromX;
-    const relativeStartY = (puck.y || 0) - fromY;
-    const startDistance = Math.hypot(relativeStartX, relativeStartY);
-    const movingTowardPuck = sweepX * relativeStartX + sweepY * relativeStartY > 0;
-    if (startDistance <= minDistance + LOCAL_CONTACT_SLOP && !movingTowardPuck) continue;
-    const t = findEarliestSweepContact(
-      relativeStartX,
-      relativeStartY,
-      -sweepX,
-      -sweepY,
-      minDistance,
-      LOCAL_CONTACT_SLOP
-    );
-    if (t === null || t >= earliest) continue;
-    earliest = t;
-  }
-
-  if (earliest >= 1) return { x: toX, y: toY, t: 1, blocked: false };
-  return {
-    x: fromX + sweepX * earliest,
-    y: fromY + sweepY * earliest,
-    t: earliest,
-    blocked: true
-  };
-}
-
-function applySegmentedLocalStrikePrediction(index, fromX, fromY, toX, toY, previousInputAt, now, inputSeq = 0) {
-  const dx = toX - fromX;
-  const dy = toY - fromY;
-  const distance = Math.hypot(dx, dy);
-  if (distance <= 0.001) return;
-
-  const inputDt = clamp((now - previousInputAt) / 1000, 1 / 240, 1 / 24);
-  const malletSpeed = distance / inputDt;
-  applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSpeed, inputSeq);
-}
-
-function applyLocalStrikePrediction(index, fromX, fromY, toX, toY, now, malletSpeedOverride = null, inputSeq = 0) {
-  if (!serverState?.pucks?.length) return;
-  const malletRadius = TABLE.malletRadius;
-  const puckRadius = TABLE.puckRadius;
-  const minDistance = malletRadius + puckRadius;
-  const sweepX = toX - fromX;
-  const sweepY = toY - fromY;
-  const malletSpeed = malletSpeedOverride ?? Math.hypot(sweepX, sweepY) * 120;
-  if (Math.abs(sweepX) < 0.001 && Math.abs(sweepY) < 0.001) return;
-
-  for (const puck of serverState.pucks) {
-    const existingPrediction = localPredictedPucks.get(puck.id);
-    if (existingPrediction && now - existingPrediction.startedAt < LOCAL_REHIT_SUPPRESSION_MS) continue;
-    if (!existingPrediction && wasPuckPredictedRecently(puck.id, now)) continue;
-    const visualPuck = existingPrediction ? advanceLocalPuckPrediction(existingPrediction, now) : { ...puck };
-    const relativeStartX = visualPuck.x - fromX;
-    const relativeStartY = visualPuck.y - fromY;
-    const relativeStartDistance = Math.hypot(relativeStartX, relativeStartY);
-    const movingTowardPuck = sweepX * relativeStartX + sweepY * relativeStartY > 0;
-    const a = sweepX * sweepX + sweepY * sweepY;
-    let hitT = null;
-
-    if (relativeStartDistance <= minDistance + 0.04 && malletSpeed > 180) {
-      hitT = 0;
-    } else if (movingTowardPuck && a > 0.000001) {
-      hitT = findEarliestSweepContact(relativeStartX, relativeStartY, -sweepX, -sweepY, minDistance, 0.04);
-    }
-
-    if (hitT === null) continue;
-
-    const contactMalletX = fromX + sweepX * hitT;
-    const contactMalletY = fromY + sweepY * hitT;
-
-    let normalX = visualPuck.x - contactMalletX;
-    let normalY = visualPuck.y - contactMalletY;
-    let normalLength = Math.hypot(normalX, normalY);
-    if (normalLength <= 0.001) {
-      normalX = sweepX || 1;
-      normalY = sweepY || 0;
-      normalLength = Math.hypot(normalX, normalY) || 1;
-    }
-    normalX /= normalLength;
-    normalY /= normalLength;
-    const moveLength = Math.hypot(sweepX, sweepY) || 1;
-    const moveX = sweepX / moveLength;
-    const moveY = sweepY / moveLength;
-
-    const puckSpeed = Math.hypot(visualPuck.vx || 0, visualPuck.vy || 0);
-    const staticKick = puckSpeed < 70 ? 500 : 0;
-    const sweepKick = staticKick > 0 && malletSpeed > 260 ? 440 : 0;
-    let exitX = normalX;
-    let exitY = normalY;
-    if (sweepKick > 0) {
-      let blendedX = normalX * 0.55 + moveX * 0.82;
-      let blendedY = normalY * 0.55 + moveY * 0.82;
-      if (blendedX * normalX + blendedY * normalY < 0.25) {
-        blendedX += normalX * 0.75;
-        blendedY += normalY * 0.75;
-      }
-      const blendedLength = Math.hypot(blendedX, blendedY) || 1;
-      exitX = blendedX / blendedLength;
-      exitY = blendedY / blendedLength;
-    }
-
-    const predictedPuck = {
-      ...visualPuck,
-      x: contactMalletX + exitX * (minDistance + LOCAL_HARD_CONTACT_SEPARATION),
-      y: contactMalletY + exitY * (minDistance + LOCAL_HARD_CONTACT_SEPARATION)
-    };
-
-    const strike = Math.min(LOCAL_PUCK_MAX_SPEED, Math.max(staticKick, 170 + malletSpeed * 0.105));
-    predictedPuck.vx = exitX * strike + moveX * sweepKick + sweepX * 8;
-    predictedPuck.vy = exitY * strike + moveY * sweepKick + sweepY * 8;
-    addLocalTangentialSweep(predictedPuck, normalX, normalY, moveX, moveY, malletSpeed);
-    capLocalPredictedPuckSpeed(predictedPuck);
-    predictedPuck.x += predictedPuck.vx * 0.014;
-    predictedPuck.y += predictedPuck.vy * 0.014;
-    markPuckPredicted(puck.id, now);
-    localPredictedPucks.set(puck.id, {
-      x: predictedPuck.x,
-      y: predictedPuck.y,
-      vx: predictedPuck.vx,
-      vy: predictedPuck.vy,
-      inputSeq,
-      ownerIndex: index,
-      serverHitSerial: existingPrediction?.serverHitSerial ?? visualPuck.hitSerial ?? 0,
-      startedAt: now,
-      updatedAt: now,
-      expiresAt: now + localPuckPredictionWindowMs()
-    });
-    lastLocalHitFxAt = performance.now();
-    playFx("hit", Math.min(1, strike / 900));
-  }
 }
 
 function findEarliestSweepContact(startX, startY, deltaX, deltaY, radius, epsilon = 0) {
@@ -2612,7 +2224,7 @@ function resizeCanvas() {
 function rememberStateSnapshot(message) {
   const serverTick = Number(message.serverTick) || 0;
   const serverTickExtended = extendServerTick(serverTick);
-  const serverTime = (serverTickExtended * 1000) / SERVER_TICK_HZ;
+  const serverTime = (serverTickExtended * 1000) / serverTickHz;
   stateSnapshots.push({
     serverTime,
     serverTick,
@@ -2696,195 +2308,8 @@ function interpolateBody(from, to, alpha) {
   };
 }
 
-function applyOnlinePhysicsPrediction(state) {
-  if (offlineGame || state?.phase !== "playing" || !state?.pucks?.length) return state;
-  let nextState = state;
-  const now = performance.now();
-  for (const puck of state.pucks) {
-    const result = resolveOnlineVisiblePuckContact(puck, state, now);
-    if (!result) continue;
-    if (nextState === state) {
-      nextState = {
-        ...state,
-        pucks: state.pucks.map((candidate) => ({ ...candidate }))
-      };
-    }
-    const nextPuck = nextState.pucks.find((candidate) => candidate.id === puck.id);
-    if (!nextPuck) continue;
-    nextPuck.x = result.x;
-    nextPuck.y = result.y;
-    nextPuck.vx = result.vx;
-    nextPuck.vy = result.vy;
-    nextPuck.localPredictedAt = now;
-    markPuckPredicted(puck.id, now);
-    localPredictedPucks.set(puck.id, {
-      x: result.x,
-      y: result.y,
-      vx: result.vx,
-      vy: result.vy,
-      inputSeq: result.inputSeq || 0,
-      ownerIndex: result.ownerIndex,
-      serverHitSerial: puck.hitSerial || 0,
-      startedAt: now,
-      updatedAt: now,
-      expiresAt: now + localPuckPredictionWindowMs()
-    });
-    lastLocalHitFxAt = now;
-    playFx("hit", 0.34);
-  }
-  return nextState;
-}
-
-function resolveOnlineVisiblePuckContact(puck, state, now) {
-  if (!ENABLE_ONLINE_PUCK_PREDICTION || localPredictedPucks.has(puck.id)) return null;
-  if (wasPuckPredictedRecently(puck.id, now)) return null;
-  for (const index of controlledMalletIndices()) {
-    const mallet = predictedMalletForPhysics(state.mallets[index], index, now, isControlledMalletIndex(index));
-    if (!mallet) continue;
-    const result = resolveSweptPuckMalletContact(
-      TABLE,
-      offlinePhysicsConfig(),
-      puckWithPreviousFrame(puck),
-      malletWithPreviousFrame(mallet, index),
-      index,
-      now
-    );
-    if (!result) continue;
-    return {
-      ...result,
-      inputSeq: mallet.inputSeq || 0,
-      ownerIndex: index
-    };
-  }
-  return null;
-}
-
-function puckWithPreviousFrame(puck) {
-  const dt = 1 / Math.max(60, Math.min(SERVER_TICK_HZ, displayRefreshHz || 60));
-  return {
-    ...puck,
-    prevX: Number.isFinite(puck.prevX) ? puck.prevX : puck.x - (puck.vx || 0) * dt,
-    prevY: Number.isFinite(puck.prevY) ? puck.prevY : puck.y - (puck.vy || 0) * dt
-  };
-}
-
-function malletWithPreviousFrame(mallet, index) {
-  const predicted = predictedMallets.get(index);
-  if (predicted && isControlledMalletIndex(index)) {
-    return {
-      ...mallet,
-      physicsPrevX:
-        predicted.prevX ?? mallet.x - (mallet.vx || 0) / Math.max(60, Math.min(SERVER_TICK_HZ, displayRefreshHz || 60)),
-      physicsPrevY:
-        predicted.prevY ?? mallet.y - (mallet.vy || 0) / Math.max(60, Math.min(SERVER_TICK_HZ, displayRefreshHz || 60))
-    };
-  }
-  const samples = remoteMalletSamples[index] || [];
-  const latest = samples[samples.length - 1];
-  return {
-    ...mallet,
-    physicsPrevX: latest?.prevX ?? mallet.x - (mallet.vx || 0) / Math.max(60, Math.min(SERVER_TICK_HZ, displayRefreshHz || 60)),
-    physicsPrevY: latest?.prevY ?? mallet.y - (mallet.vy || 0) / Math.max(60, Math.min(SERVER_TICK_HZ, displayRefreshHz || 60))
-  };
-}
-
-function displayPuck(puck, state) {
-  if (ENABLE_ONLINE_PUCK_PREDICTION) maybePredictLocalBlockContact(puck, state);
-  const prediction = localPredictedPucks.get(puck.id);
-  const now = performance.now();
-  if (prediction) {
-    if (now >= prediction.expiresAt) {
-      localPredictedPucks.delete(puck.id);
-      startPuckCorrection(puck.id, prediction.x, prediction.y, puck.x, puck.y, now);
-    } else {
-      const predicted = advanceLocalPuckPrediction(prediction, now);
-      return {
-        ...puck,
-        x: predicted.x,
-        y: predicted.y,
-        vx: predicted.vx,
-        vy: predicted.vy
-      };
-    }
-  }
-  const correction = puckCorrections.get(puck.id);
-  if (!correction) return puck;
-  if (now >= correction.expiresAt) {
-    puckCorrections.delete(puck.id);
-    return puck;
-  }
-
-  const duration = Math.max(1, correction.expiresAt - correction.startedAt);
-  const alpha = clamp((now - correction.startedAt) / duration, 0, 1);
-  const blend = 1 - Math.pow(1 - alpha, 2);
-  return {
-    ...puck,
-    x: lerp(correction.fromX, correction.toX, blend),
-    y: lerp(correction.fromY, correction.toY, blend)
-  };
-}
-
-function maybePredictLocalBlockContact(puck, state) {
-  if (!ENABLE_ONLINE_PUCK_PREDICTION || serverState?.phase !== "playing") return;
-  if (!puck || localPredictedPucks.has(puck.id)) return;
-  const now = performance.now();
-  if (wasPuckPredictedRecently(puck.id, now)) return;
-
-  for (const index of controlledMalletIndices()) {
-    const mallet = predictedMalletForPhysics(state?.mallets?.[index], index, now, true);
-    if (!mallet) continue;
-    const result = resolveSweptPuckMalletContact(
-      TABLE,
-      offlinePhysicsConfig(),
-      puckWithPreviousFrame(puck),
-      malletWithPreviousFrame(mallet, index),
-      index,
-      now
-    );
-    if (!result) continue;
-
-    localPredictedPucks.set(puck.id, {
-      x: result.x,
-      y: result.y,
-      vx: result.vx,
-      vy: result.vy,
-      inputSeq: mallet.inputSeq || 0,
-      ownerIndex: index,
-      serverHitSerial: puck.hitSerial || 0,
-      startedAt: now,
-      updatedAt: now,
-      expiresAt: now + localPuckPredictionWindowMs()
-    });
-    markPuckPredicted(puck.id, now);
-    lastLocalHitFxAt = now;
-    playFx("hit", 0.34);
-    return;
-  }
-}
-
-function controlledMalletIndices() {
-  if (isLocalGame()) return [0, 1];
-  return playerIndex === 0 || playerIndex === 1 ? [playerIndex] : [];
-}
-
-function predictedMalletForPhysics(mallet, index, now = performance.now(), requireFreshInput = false) {
-  const predicted = predictedMallets.get(index);
-  if (predicted && now <= predicted.expiresAt) {
-    if (requireFreshInput && now - (predicted.inputAt || 0) > LOCAL_BLOCK_INPUT_GRACE_MS) return null;
-    return {
-      ...(mallet || {}),
-      x: predicted.x,
-      y: predicted.y,
-      vx: predicted.vx || 0,
-      vy: predicted.vy || 0,
-      physicsPrevX: predicted.prevX ?? predicted.x,
-      physicsPrevY: predicted.prevY ?? predicted.y,
-      inputSeq: predicted.inputSeq || 0
-    };
-  }
-  if (predicted) predictedMallets.delete(index);
-  if (requireFreshInput) return null;
-  return mallet || null;
+function displayPuck(puck) {
+  return puck;
 }
 
 function isInputSeqAcknowledged(ackInputSeq, inputSeq) {
@@ -2892,6 +2317,14 @@ function isInputSeqAcknowledged(ackInputSeq, inputSeq) {
   const input = inputSeq & 0xffff;
   if (ack === input) return true;
   return ((ack - input + 0x10000) & 0xffff) < 0x8000;
+}
+
+function pruneAcknowledgedOutgoingTargets(ackInputSeq) {
+  for (const [index, target] of outgoingMalletTargets) {
+    if (!target?.inputSeq || isInputSeqAcknowledged(ackInputSeq, target.inputSeq)) {
+      outgoingMalletTargets.delete(index);
+    }
+  }
 }
 
 function wrappedTickDelta(previousTick, nextTick) {
@@ -3954,40 +3387,8 @@ function drawState(state) {
   ctx.restore();
 }
 
-function displayMallet(mallet, index) {
-  const predicted = predictedMallets.get(index);
-  if (!predicted) return mallet;
-  const now = performance.now();
-  if (Number.isFinite(predicted.targetX) && Number.isFinite(predicted.targetY)) {
-    const dt = clamp((now - (predicted.updatedAt || predicted.inputAt || now)) / 1000, 0, 0.05);
-    if (dt > 0.000001) {
-      const fromX = predicted.x;
-      const fromY = predicted.y;
-      const next = limitPointStep(
-        fromX,
-        fromY,
-        predicted.targetX,
-        predicted.targetY,
-        LOCAL_HUMAN_MALLET_MAX_SPEED * dt
-      );
-      predicted.x = next.x;
-      predicted.y = next.y;
-      predicted.vx = (next.x - fromX) / dt;
-      predicted.vy = (next.y - fromY) / dt;
-      predicted.prevX = fromX;
-      predicted.prevY = fromY;
-      predicted.updatedAt = now;
-    }
-  }
-  if (now > predicted.expiresAt) {
-    predictedMallets.delete(index);
-    return mallet;
-  }
-  return {
-    ...mallet,
-    x: predicted.x,
-    y: predicted.y
-  };
+function displayMallet(mallet) {
+  return mallet;
 }
 
 function drawCanvasScores(state) {

@@ -35,8 +35,8 @@ const TABLE = {
   firstTo: 7
 };
 
-const PHYSICS_HZ = 240;
-const SNAPSHOT_HZ = 144;
+const PHYSICS_HZ = readTickHz("AIR_HOCKEY_PHYSICS_HZ", 360, 240, 480);
+const SNAPSHOT_HZ = readTickHz("AIR_HOCKEY_SNAPSHOT_HZ", 180, 120, Math.min(240, PHYSICS_HZ));
 const DT = 1 / PHYSICS_HZ;
 const MALLET_MAX_SPEED = 3600;
 const HUMAN_MALLET_MAX_SPEED = 3800;
@@ -111,7 +111,9 @@ const server = http.createServer((req, res) => {
     res.end(
       [
         `window.AIR_HOCKEY_SERVER_URL = ${JSON.stringify(String(process.env.AIR_HOCKEY_SERVER_URL || "").trim())};`,
-        "window.AIR_HOCKEY_REALTIME_MODE = 'server-authoritative-websocket';"
+        "window.AIR_HOCKEY_REALTIME_MODE = 'server-authoritative-websocket';",
+        `window.AIR_HOCKEY_PHYSICS_HZ = ${PHYSICS_HZ};`,
+        `window.AIR_HOCKEY_SNAPSHOT_HZ = ${SNAPSHOT_HZ};`
       ].join("\n")
     );
     return;
@@ -217,7 +219,9 @@ server.on("upgrade", (req, socket) => {
     clientId: client.id,
     table: TABLE,
     protocolVersion: PROTOCOL_VERSION,
-    realtimeMode: "binary-websocket"
+    realtimeMode: "binary-websocket",
+    physicsHz: PHYSICS_HZ,
+    snapshotHz: SNAPSHOT_HZ
   });
 
   socket.on("data", (chunk) => readFrames(client, chunk));
@@ -376,7 +380,7 @@ function handleMessage(client, message) {
 }
 
 function updateClientDisplay(client, message) {
-  const refreshHz = clamp(Math.round(Number(message.refreshHz) || SNAPSHOT_HZ), 60, PHYSICS_HZ);
+  const refreshHz = clamp(Math.round(Number(message.refreshHz) || SNAPSHOT_HZ), 60, SNAPSHOT_HZ);
   client.displayRefreshHz = refreshHz;
   client.snapshotIntervalMs = 1000 / refreshHz;
 }
@@ -3105,6 +3109,18 @@ export function runServerMatterWorldSelfTest() {
   };
 }
 
+export function runTickConfigSelfTest() {
+  return {
+    physicsHz: PHYSICS_HZ,
+    snapshotHz: SNAPSHOT_HZ,
+    passed:
+      PHYSICS_HZ >= 240 &&
+      PHYSICS_HZ <= 480 &&
+      SNAPSHOT_HZ >= 120 &&
+      SNAPSHOT_HZ <= Math.min(240, PHYSICS_HZ)
+  };
+}
+
 export function runMalletReleaseLockSelfTest() {
   const now = Date.now();
   const room = {
@@ -3262,6 +3278,10 @@ function capPuckSpeed(puck) {
 function clamp(value, min, max) {
   if (!Number.isFinite(value)) return (min + max) / 2;
   return Math.max(min, Math.min(max, value));
+}
+
+function readTickHz(name, fallback, min, max) {
+  return Math.round(clamp(Number(process.env[name]) || fallback, min, max));
 }
 
 function lerp(from, to, alpha) {
