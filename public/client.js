@@ -2043,15 +2043,20 @@ function sendPointerFromPoint(point, force, targetIndex) {
     constrained.y,
     LOCAL_HUMAN_MALLET_MAX_SPEED * predictedDt
   );
+  const guarded =
+    serverState?.phase === "playing"
+      ? guardPredictedMalletSweepAgainstPucks(fromX, fromY, limited.x, limited.y, serverState.pucks || [])
+      : { x: limited.x, y: limited.y, blocked: false };
+  const originalPredictedSpeed = Math.hypot(limited.x - fromX, limited.y - fromY) / predictedDt;
   if (serverState?.mallets?.[targetIndex]) {
-    serverState.mallets[targetIndex].x = limited.x;
-    serverState.mallets[targetIndex].y = limited.y;
+    serverState.mallets[targetIndex].x = guarded.x;
+    serverState.mallets[targetIndex].y = guarded.y;
   }
   predictedMallets.set(targetIndex, {
-    x: limited.x,
-    y: limited.y,
-    vx: (limited.x - fromX) / predictedDt,
-    vy: (limited.y - fromY) / predictedDt,
+    x: guarded.x,
+    y: guarded.y,
+    vx: (guarded.x - fromX) / predictedDt,
+    vy: (guarded.y - fromY) / predictedDt,
     prevX: fromX,
     prevY: fromY,
     targetX: constrained.x,
@@ -2062,14 +2067,14 @@ function sendPointerFromPoint(point, force, targetIndex) {
     expiresAt: performance.now() + 180
   });
   if (ENABLE_ONLINE_PUCK_PREDICTION) {
-    applySegmentedLocalStrikePrediction(
+    applyLocalStrikePrediction(
       targetIndex,
       fromX,
       fromY,
-      limited.x,
-      limited.y,
-      previousInputAt,
+      guarded.x,
+      guarded.y,
       now,
+      originalPredictedSpeed,
       inputSeq
     );
   }
@@ -2082,6 +2087,42 @@ function sendPointerFromPoint(point, force, targetIndex) {
       y: constrained.y
     })
   );
+}
+
+function guardPredictedMalletSweepAgainstPucks(fromX, fromY, toX, toY, pucks = []) {
+  const sweepX = toX - fromX;
+  const sweepY = toY - fromY;
+  if (Math.hypot(sweepX, sweepY) <= 0.001 || !pucks.length) {
+    return { x: toX, y: toY, t: 1, blocked: false };
+  }
+
+  let earliest = 1;
+  const minDistance = TABLE.malletRadius + TABLE.puckRadius;
+  for (const puck of pucks) {
+    const relativeStartX = (puck.x || 0) - fromX;
+    const relativeStartY = (puck.y || 0) - fromY;
+    const startDistance = Math.hypot(relativeStartX, relativeStartY);
+    const movingTowardPuck = sweepX * relativeStartX + sweepY * relativeStartY > 0;
+    if (startDistance <= minDistance + LOCAL_CONTACT_SLOP && !movingTowardPuck) continue;
+    const t = findEarliestSweepContact(
+      relativeStartX,
+      relativeStartY,
+      -sweepX,
+      -sweepY,
+      minDistance,
+      LOCAL_CONTACT_SLOP
+    );
+    if (t === null || t >= earliest) continue;
+    earliest = t;
+  }
+
+  if (earliest >= 1) return { x: toX, y: toY, t: 1, blocked: false };
+  return {
+    x: fromX + sweepX * earliest,
+    y: fromY + sweepY * earliest,
+    t: earliest,
+    blocked: true
+  };
 }
 
 function applySegmentedLocalStrikePrediction(index, fromX, fromY, toX, toY, previousInputAt, now, inputSeq = 0) {

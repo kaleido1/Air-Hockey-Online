@@ -3,6 +3,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import Matter from "matter-js";
 import SAT from "sat";
 import {
   decodeRealtimePacket,
@@ -59,6 +60,8 @@ const STRONG_STRIKE_MIN_SPEED = 160;
 const STRIKE_ESCAPE_TRANSFER = 0.38;
 const STRONG_SWEEP_TANGENTIAL_TRANSFER = 0.08;
 const STRONG_SWEEP_TANGENTIAL_MAX = 180;
+const MATTER_SWEEP_SAMPLES = 12;
+const MATTER_SWEEP_BINARY_STEPS = 12;
 const PUCK_SUBSTEPS = 14;
 const IMMEDIATE_HIT_STATE_GAP_MS = 6;
 const INPUT_STATE_GAP_MS = 8;
@@ -856,16 +859,20 @@ function updateInput(client, message) {
 function applyDirectInputSweep(room, mallet, malletIndex, targetX, targetY, inputDt, now, baseVx, baseVy) {
   const startX = mallet.x;
   const startY = mallet.y;
+  const guarded = guardMalletSweepWithMatter(room, malletIndex, startX, startY, targetX, targetY);
+  const sweepDt = guarded.blocked
+    ? Math.max(1 / 300, inputDt * Math.max(guarded.t, 0.001))
+    : inputDt;
   mallet.sweepFromX = startX;
   mallet.sweepFromY = startY;
-  mallet.sweepStartedAt = now - inputDt * 1000;
+  mallet.sweepStartedAt = now - sweepDt * 1000;
   mallet.hasPendingSweep = true;
-  mallet.x = targetX;
-  mallet.y = targetY;
+  mallet.x = guarded.x;
+  mallet.y = guarded.y;
   mallet.vx = baseVx;
   mallet.vy = baseVy;
 
-  const anyHit = resolveInputHits(room, mallet, malletIndex, inputDt, false);
+  const anyHit = resolveInputHits(room, mallet, malletIndex, sweepDt, false);
 
   for (const puck of room.state.pucks) {
     forceSeparatePuckFromAllMallets(room, puck);
@@ -875,6 +882,117 @@ function applyDirectInputSweep(room, mallet, malletIndex, targetX, targetY, inpu
 
   if (anyHit) sendImmediateHitState(room, now);
   sendInputState(room, now);
+}
+
+function guardMalletSweepWithMatter(room, malletIndex, startX, startY, targetX, targetY) {
+  const sweepX = targetX - startX;
+  const sweepY = targetY - startY;
+  const distance = Math.hypot(sweepX, sweepY);
+  if (distance <= 0.001 || !room?.state?.pucks?.length) {
+    return { x: targetX, y: targetY, t: 1, blocked: false, puck: null };
+  }
+
+  let earliest = 1;
+  let blockingPuck = null;
+  for (const puck of room.state.pucks) {
+    const contact = findMatterMalletSweepContact(startX, startY, targetX, targetY, puck);
+    if (!contact || contact.t >= earliest) continue;
+    earliest = contact.t;
+    blockingPuck = puck;
+  }
+
+  if (!blockingPuck || earliest >= 1) {
+    return { x: targetX, y: targetY, t: 1, blocked: false, puck: null };
+  }
+
+  const t = clamp(earliest, 0, 1);
+  return {
+    x: startX + sweepX * t,
+    y: startY + sweepY * t,
+    t,
+    blocked: true,
+    puck: blockingPuck
+  };
+}
+
+function findMatterMalletSweepContact(startX, startY, targetX, targetY, puck) {
+  const sweepX = targetX - startX;
+  const sweepY = targetY - startY;
+  const minDistance = TABLE.malletRadius + TABLE.puckRadius;
+  const relativeStartX = puck.x - startX;
+  const relativeStartY = puck.y - startY;
+  const startDistance = Math.hypot(relativeStartX, relativeStartY);
+  const movingTowardPuck = sweepX * relativeStartX + sweepY * relativeStartY > 0;
+  if (startDistance <= minDistance + CONTACT_SLOP && !movingTowardPuck) return null;
+  const analyticT = findEarliestSweepContact(
+    relativeStartX,
+    relativeStartY,
+    -sweepX,
+    -sweepY,
+    minDistance,
+    CONTACT_SLOP
+  );
+  const matterT = findMatterSweepCollisionT(startX, startY, targetX, targetY, puck);
+
+  if (analyticT === null && matterT === null) return null;
+  return { t: clamp(analyticT ?? matterT, 0, 1), matterT };
+}
+
+function findMatterSweepCollisionT(startX, startY, targetX, targetY, puck) {
+  const sweepX = targetX - startX;
+  const sweepY = targetY - startY;
+  const malletBody = makeMatterCircle(startX, startY, TABLE.malletRadius);
+  const puckBody = makeMatterCircle(puck.x, puck.y, TABLE.puckRadius + CONTACT_SLOP);
+
+  if (matterCirclesCollideAt(malletBody, puckBody, startX, startY)) return 0;
+  if (!matterCirclesCollideAt(malletBody, puckBody, targetX, targetY)) {
+    let previousT = 0;
+    let hitT = null;
+    for (let sample = 1; sample <= MATTER_SWEEP_SAMPLES; sample += 1) {
+      const t = sample / MATTER_SWEEP_SAMPLES;
+      const x = startX + sweepX * t;
+      const y = startY + sweepY * t;
+      if (matterCirclesCollideAt(malletBody, puckBody, x, y)) {
+        hitT = t;
+        break;
+      }
+      previousT = t;
+    }
+    if (hitT === null) return null;
+    return refineMatterSweepCollisionT(malletBody, puckBody, startX, startY, sweepX, sweepY, previousT, hitT);
+  }
+
+  return refineMatterSweepCollisionT(malletBody, puckBody, startX, startY, sweepX, sweepY, 0, 1);
+}
+
+function refineMatterSweepCollisionT(malletBody, puckBody, startX, startY, sweepX, sweepY, low, high) {
+  let lo = low;
+  let hi = high;
+  for (let step = 0; step < MATTER_SWEEP_BINARY_STEPS; step += 1) {
+    const mid = (lo + hi) / 2;
+    const x = startX + sweepX * mid;
+    const y = startY + sweepY * mid;
+    if (matterCirclesCollideAt(malletBody, puckBody, x, y)) {
+      hi = mid;
+    } else {
+      lo = mid;
+    }
+  }
+  return hi;
+}
+
+function makeMatterCircle(x, y, radius) {
+  return Matter.Bodies.circle(x, y, radius, {
+    isStatic: true,
+    friction: 0,
+    frictionAir: 0,
+    restitution: 1
+  });
+}
+
+function matterCirclesCollideAt(malletBody, puckBody, x, y) {
+  Matter.Body.setPosition(malletBody, { x, y });
+  return Boolean(Matter.Collision.collides(malletBody, puckBody)?.collided);
 }
 
 function tickRooms() {
@@ -893,7 +1011,7 @@ function tickRooms() {
 
     if (room.players[1]?.bot) updateBot(room);
 
-    moveMallets(room.state, DT);
+    moveMallets(room, DT);
     if (room.state.phase === "playing") settlePuckMalletOverlaps(room);
 
     if (room.state.phase === "countdown" && now >= room.state.phaseEndsAt) {
@@ -923,7 +1041,8 @@ function tickRooms() {
 }
 
 
-function moveMallets(state, dt) {
+function moveMallets(room, dt) {
+  const state = room.state;
   for (let index = 0; index < state.mallets.length; index += 1) {
     const mallet = state.mallets[index];
     if (mallet.directInputUntil && Date.now() < mallet.directInputUntil) continue;
@@ -938,13 +1057,19 @@ function moveMallets(state, dt) {
     mallet.sweepFromX = previousX;
     mallet.sweepFromY = previousY;
 
-    if (distance > maxMove && distance > 0.001) {
-      mallet.x += (dx / distance) * maxMove;
-      mallet.y += (dy / distance) * maxMove;
-    } else {
-      mallet.x = target.x;
-      mallet.y = target.y;
-    }
+    const desired =
+      distance > maxMove && distance > 0.001
+        ? {
+            x: mallet.x + (dx / distance) * maxMove,
+            y: mallet.y + (dy / distance) * maxMove
+          }
+        : target;
+    const guarded =
+      state.phase === "playing"
+        ? guardMalletSweepWithMatter(room, index, previousX, previousY, desired.x, desired.y)
+        : { x: desired.x, y: desired.y };
+    mallet.x = guarded.x;
+    mallet.y = guarded.y;
 
     mallet.vx = (mallet.x - previousX) / dt;
     mallet.vy = (mallet.y - previousY) / dt;
@@ -2182,13 +2307,21 @@ export function runPhysicsSelfTest() {
   applyDirectInputSweep(room, mallet, 0, targetX, targetY, inputDt, Date.now(), baseVx, baseVy);
 
   const puck = room.state.pucks[0];
+  const distance = Math.hypot(puck.x - mallet.x, puck.y - mallet.y);
+  const targetDistance = TABLE.malletRadius + TABLE.puckRadius + HARD_CONTACT_SEPARATION;
   const speed = Math.hypot(puck.vx, puck.vy);
   rooms.delete(room.code);
 
   return {
+    mallet,
+    distance,
+    targetDistance,
     speed,
     puck,
-    passed: speed >= 520 && puck.x > TABLE.width / 2 + TABLE.puckRadius
+    passed:
+      speed >= 520 &&
+      distance >= targetDistance - 0.001 &&
+      mallet.x < TABLE.width / 2 - TABLE.puckRadius
   };
 }
 
@@ -2323,15 +2456,16 @@ export function runRepeatedContactReleaseSelfTest() {
 
 export function runDirectInputNoSwallowSelfTest() {
   const now = Date.now();
+  const initialPuckX = TABLE.width / 2;
   const room = makeRoom({ puckCount: 1, lan: true });
   room.players = [null, null];
   room.state.phase = "playing";
   room.state.pucks = [
     {
       id: "direct-input-no-swallow",
-      x: TABLE.width / 2,
+      x: initialPuckX,
       y: TABLE.height * 0.72,
-      prevX: TABLE.width / 2,
+      prevX: initialPuckX,
       prevY: TABLE.height * 0.72,
       vx: 0,
       vy: 0,
@@ -2375,18 +2509,61 @@ export function runDirectInputNoSwallowSelfTest() {
   const distance = Math.hypot(puck.x - publicMallet.x, puck.y - publicMallet.y);
   const targetDistance = TABLE.malletRadius + TABLE.puckRadius + HARD_CONTACT_SEPARATION;
   const speed = Math.hypot(puck.vx, puck.vy);
+  const malletStayedOnImpactSide = publicMallet.x <= initialPuckX - TABLE.malletRadius - TABLE.puckRadius + 0.02;
   rooms.delete(room.code);
 
   return {
     distance,
     targetDistance,
+    malletStayedOnImpactSide,
     speed,
     puck,
     mallet: publicMallet,
     passed:
       distance >= targetDistance - 0.02 &&
+      malletStayedOnImpactSide &&
       speed <= PUCK_MAX_SPEED + 0.001 &&
       puck.x !== publicMallet.x
+  };
+}
+
+export function runMatterMalletSweepGuardSelfTest() {
+  const room = makeRoom({ puckCount: 1, lan: true });
+  room.players = [null, null];
+  room.state.phase = "playing";
+  const puck = {
+    id: "matter-sweep-guard",
+    x: TABLE.width / 2,
+    y: TABLE.height * 0.72,
+    prevX: TABLE.width / 2,
+    prevY: TABLE.height * 0.72,
+    vx: 0,
+    vy: 0,
+    stuckFor: 0,
+    lastMalletHitIndex: null,
+    lastMalletHitAt: 0
+  };
+  room.state.pucks = [puck];
+  const mallet = room.state.mallets[0];
+  const startX = TABLE.width / 2 - 130;
+  const targetX = TABLE.width / 2 + 130;
+  mallet.x = startX;
+  mallet.y = puck.y;
+
+  const guarded = guardMalletSweepWithMatter(room, 0, mallet.x, mallet.y, targetX, puck.y);
+  const contactX = puck.x - TABLE.malletRadius - TABLE.puckRadius;
+  const movingAway = guardMalletSweepWithMatter(room, 0, contactX, puck.y, contactX - 40, puck.y);
+  rooms.delete(room.code);
+
+  return {
+    guarded,
+    movingAway,
+    passed:
+      guarded.blocked &&
+      guarded.x <= puck.x - TABLE.malletRadius - TABLE.puckRadius + 0.001 &&
+      guarded.t > 0 &&
+      guarded.t < 1 &&
+      !movingAway.blocked
   };
 }
 
