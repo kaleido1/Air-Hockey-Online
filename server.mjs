@@ -12,6 +12,7 @@ import {
 } from "./public/protocol.js";
 import {
   applyPuckInertia,
+  detectGoalCrossing,
   limitPointStep,
   separatePuckFromMallet
 } from "./public/offline-physics.js";
@@ -612,12 +613,149 @@ function makeRoom(options = {}) {
     lastInputStateAt: 0,
     lastFxAt: new Map(),
     botBrain: null,
+    matter: null,
     createdAt: Date.now(),
     updatedAt: Date.now()
   };
 
+  room.matter = createMatterSimulation();
+  resetMatterWorld(room);
+  syncMatterPuckBodies(room);
   rooms.set(code, room);
   return room;
+}
+
+function createMatterSimulation() {
+  const engine = Matter.Engine.create({ enableSleeping: false });
+  engine.gravity.x = 0;
+  engine.gravity.y = 0;
+  return {
+    engine,
+    puckBodies: new Map(),
+    malletBodies: [],
+    wallBodies: []
+  };
+}
+
+function resetMatterWorld(room) {
+  if (!room) return;
+  if (!room.matter) room.matter = createMatterSimulation();
+  const matter = room.matter;
+  Matter.Composite.clear(matter.engine.world, false);
+  matter.puckBodies.clear();
+  matter.wallBodies = createMatterWallBodies();
+  matter.malletBodies = room.state.mallets.map((mallet, index) => createMatterMalletBody(mallet, index));
+  Matter.Composite.add(matter.engine.world, [...matter.wallBodies, ...matter.malletBodies]);
+}
+
+function createMatterWallBodies() {
+  const t = 90;
+  const goalLeft = TABLE.width / 2 - TABLE.goalWidth / 2;
+  const goalRight = TABLE.width / 2 + TABLE.goalWidth / 2;
+  const wallOptions = {
+    isStatic: true,
+    restitution: WALL_RESTITUTION,
+    friction: 0,
+    frictionStatic: 0,
+    frictionAir: 0,
+    label: "wall"
+  };
+  return [
+    Matter.Bodies.rectangle(-t / 2, TABLE.height / 2, t, TABLE.height + t * 2, wallOptions),
+    Matter.Bodies.rectangle(TABLE.width + t / 2, TABLE.height / 2, t, TABLE.height + t * 2, wallOptions),
+    Matter.Bodies.rectangle(goalLeft / 2, -t / 2, goalLeft, t, wallOptions),
+    Matter.Bodies.rectangle(goalRight + (TABLE.width - goalRight) / 2, -t / 2, TABLE.width - goalRight, t, wallOptions),
+    Matter.Bodies.rectangle(goalLeft / 2, TABLE.height + t / 2, goalLeft, t, wallOptions),
+    Matter.Bodies.rectangle(
+      goalRight + (TABLE.width - goalRight) / 2,
+      TABLE.height + t / 2,
+      TABLE.width - goalRight,
+      t,
+      wallOptions
+    )
+  ];
+}
+
+function createMatterMalletBody(mallet, index) {
+  return Matter.Bodies.circle(mallet.x, mallet.y, TABLE.malletRadius, {
+    isStatic: true,
+    restitution: MALLET_RESTITUTION,
+    friction: 0,
+    frictionStatic: 0,
+    frictionAir: 0,
+    label: `mallet-${index}`
+  });
+}
+
+function createMatterPuckBody(puck) {
+  const body = Matter.Bodies.circle(puck.x, puck.y, TABLE.puckRadius, {
+    restitution: WALL_RESTITUTION,
+    friction: 0,
+    frictionStatic: 0,
+    frictionAir: 0,
+    label: puck.id
+  });
+  Matter.Body.setVelocity(body, { x: (puck.vx || 0) / 60, y: (puck.vy || 0) / 60 });
+  return body;
+}
+
+function syncMatterPuckBodies(room) {
+  if (!room?.matter) return;
+  const wanted = new Set((room.state.pucks || []).map((puck) => puck.id));
+  for (const [id, body] of room.matter.puckBodies) {
+    if (wanted.has(id)) continue;
+    Matter.Composite.remove(room.matter.engine.world, body);
+    room.matter.puckBodies.delete(id);
+  }
+  for (const puck of room.state.pucks || []) {
+    if (room.matter.puckBodies.has(puck.id)) continue;
+    const body = createMatterPuckBody(puck);
+    room.matter.puckBodies.set(puck.id, body);
+    Matter.Composite.add(room.matter.engine.world, body);
+  }
+}
+
+function removeMatterPuckBody(room, puck) {
+  const body = room?.matter?.puckBodies?.get(puck.id);
+  if (!body) return;
+  Matter.Composite.remove(room.matter.engine.world, body);
+  room.matter.puckBodies.delete(puck.id);
+}
+
+function syncMatterPuckBody(room, puck) {
+  if (!room?.matter) return;
+  let body = room.matter.puckBodies.get(puck.id);
+  if (!body) {
+    syncMatterPuckBodies(room);
+    body = room.matter.puckBodies.get(puck.id);
+  }
+  if (!body) return;
+  Matter.Body.setPosition(body, { x: puck.x, y: puck.y });
+  Matter.Body.setVelocity(body, { x: (puck.vx || 0) / 60, y: (puck.vy || 0) / 60 });
+}
+
+function syncPuckFromMatterBody(room, puck) {
+  const body = room?.matter?.puckBodies?.get(puck.id);
+  if (!body) return;
+  puck.x = body.position.x;
+  puck.y = body.position.y;
+  puck.vx = body.velocity.x * 60;
+  puck.vy = body.velocity.y * 60;
+}
+
+function syncMatterMalletBodies(room) {
+  if (!room?.matter) return;
+  if (room.matter.malletBodies.length !== room.state.mallets.length) {
+    resetMatterWorld(room);
+    syncMatterPuckBodies(room);
+  }
+  for (let index = 0; index < room.state.mallets.length; index += 1) {
+    const mallet = room.state.mallets[index];
+    const body = room.matter.malletBodies[index];
+    if (!body) continue;
+    Matter.Body.setPosition(body, { x: mallet.x, y: mallet.y });
+    Matter.Body.setVelocity(body, { x: (mallet.vx || 0) / 60, y: (mallet.vy || 0) / 60 });
+  }
 }
 
 function startRoom(room) {
@@ -878,6 +1016,7 @@ function applyDirectInputSweep(room, mallet, malletIndex, targetX, targetY, inpu
     forceSeparatePuckFromAllMallets(room, puck);
     collidePuckWithWalls(room, puck);
     capPuckSpeed(puck);
+    syncMatterPuckBody(room, puck);
   }
 
   if (anyHit) sendImmediateHitState(room, now);
@@ -1085,6 +1224,7 @@ function resolveInputHits(room, mallet, malletIndex, dt, emitState = true) {
     forceSeparatePuckFromAllMallets(room, puck);
     collidePuckWithWalls(room, puck);
     capPuckSpeed(puck);
+    syncMatterPuckBody(room, puck);
     emitFx(room, "hit", false, hit);
   }
   if (anyHit && emitState) sendImmediateHitState(room, Date.now());
@@ -1097,6 +1237,7 @@ function settlePuckMalletOverlaps(room) {
     forceSeparatePuckFromAllMallets(room, puck);
     collidePuckWithWalls(room, puck);
     capPuckSpeed(puck);
+    syncMatterPuckBody(room, puck);
   }
 }
 
@@ -1104,61 +1245,41 @@ function stepPucks(room, dt) {
   const state = room.state;
   const scored = [];
   const activePucks = [];
-  let anyMalletHit = false;
 
+  syncMatterPuckBodies(room);
+  syncMatterMalletBodies(room);
   for (const puck of state.pucks) {
     puck.prevX = puck.x;
     puck.prevY = puck.y;
     applyPuckInertia(puck, PUCK_INERTIA, dt);
-
-    puck.x += puck.vx * dt;
-    puck.y += puck.vy * dt;
-
-    collidePuckWithWalls(room, puck);
-    const hitA = collidePuckWithMallet(room, puck, state.mallets[0], 0, dt);
-    if (hitA) {
-      anyMalletHit = true;
-      forceSeparatePuckFromAllMallets(room, puck);
-      collidePuckWithWalls(room, puck);
-      capPuckSpeed(puck);
-      emitFx(room, "hit", false, hitA);
-    }
-    const hitB = collidePuckWithMallet(room, puck, state.mallets[1], 1, dt);
-    if (hitB) {
-      anyMalletHit = true;
-      forceSeparatePuckFromAllMallets(room, puck);
-      collidePuckWithWalls(room, puck);
-      capPuckSpeed(puck);
-      emitFx(room, "hit", false, hitB);
-    }
-    forceSeparatePuckFromAllMallets(room, puck);
-    collidePuckWithWalls(room, puck);
-    rescueStuckPuck(room, puck, dt);
     capPuckSpeed(puck);
+    syncMatterPuckBody(room, puck);
+  }
 
-    const scorer = detectGoal(puck);
+  Matter.Engine.update(room.matter.engine, dt * 1000);
+
+  for (const puck of state.pucks) {
+    syncPuckFromMatterBody(room, puck);
+    capPuckSpeed(puck);
+    syncMatterPuckBody(room, puck);
+
+    const scorer = detectGoalCrossing(TABLE, puck) ?? detectGoal(puck);
     if (scorer !== null) {
       scored.push(scorer);
-    } else {
-      activePucks.push(puck);
+      removeMatterPuckBody(room, puck);
+      continue;
     }
+
+    forceSeparatePuckFromAllMallets(room, puck);
+    capPuckSpeed(puck);
+    rescueStuckPuck(room, puck, dt);
+    capPuckSpeed(puck);
+    syncMatterPuckBody(room, puck);
+    activePucks.push(puck);
   }
 
   state.pucks = activePucks;
-
-  if (state.pucks.length > 1) {
-    for (let a = 0; a < state.pucks.length; a += 1) {
-      for (let b = a + 1; b < state.pucks.length; b += 1) {
-        const puckHit = collidePucks(state.pucks[a], state.pucks[b]);
-        if (puckHit) emitFx(room, "hit", false, puckHit);
-        collidePuckWithWalls(room, state.pucks[a]);
-        collidePuckWithWalls(room, state.pucks[b]);
-      }
-    }
-  }
-
   if (scored.length > 0) awardScoredPucks(room, scored);
-  if (anyMalletHit) sendImmediateHitState(room, Date.now());
 }
 
 function collidePuckWithWalls(room, puck) {
@@ -1885,6 +2006,7 @@ function resetPucks(room, scorer) {
   const server =
     scorer === 0 ? 1 : scorer === 1 ? 0 : Math.random() > 0.5 ? 0 : 1;
   const serveY = getServeAnchorY(server);
+  if (room.matter) resetMatterWorld(room);
   room.state.roundScorers = [0, 0];
   room.state.nextServeScorer = null;
   room.state.pucks = [];
@@ -1908,6 +2030,7 @@ function resetPucks(room, scorer) {
       hitSerial: 0
     });
   }
+  syncMatterPuckBodies(room);
 }
 
 function chooseSafeServePosition(state, preferredX, preferredY, server) {
@@ -2564,6 +2687,66 @@ export function runMatterMalletSweepGuardSelfTest() {
       guarded.t > 0 &&
       guarded.t < 1 &&
       !movingAway.blocked
+  };
+}
+
+export function runServerMatterWorldSelfTest() {
+  const room = makeRoom({ puckCount: 2, lan: true });
+  room.players = [null, null];
+  room.state.phase = "playing";
+  room.state.pucks = [
+    {
+      id: "matter-wall",
+      x: TABLE.width - TABLE.puckRadius - 2,
+      y: TABLE.height * 0.7,
+      prevX: TABLE.width - TABLE.puckRadius - 2,
+      prevY: TABLE.height * 0.7,
+      vx: 900,
+      vy: 0,
+      stuckFor: 0,
+      lastMalletHitIndex: null,
+      lastMalletHitAt: 0,
+      hitSerial: 0
+    },
+    {
+      id: "matter-peer",
+      x: TABLE.width / 2,
+      y: TABLE.height * 0.7,
+      prevX: TABLE.width / 2,
+      prevY: TABLE.height * 0.7,
+      vx: 0,
+      vy: 0,
+      stuckFor: 0,
+      lastMalletHitIndex: null,
+      lastMalletHitAt: 0,
+      hitSerial: 0
+    }
+  ];
+  resetMatterWorld(room);
+  syncMatterPuckBodies(room);
+
+  stepPucks(room, 1 / PHYSICS_HZ);
+
+  const puck = room.state.pucks.find((entry) => entry.id === "matter-wall");
+  const body = room.matter.puckBodies.get("matter-wall");
+  const synced =
+    puck &&
+    body &&
+    Math.abs(puck.x - body.position.x) < 0.001 &&
+    Math.abs(puck.y - body.position.y) < 0.001;
+  const bounced = puck?.vx < 0 && puck.x <= TABLE.width - TABLE.puckRadius + 0.5;
+  const matterActive =
+    room.matter.engine.world.bodies.includes(body) &&
+    room.matter.engine.world.bodies.some((entry) => entry.label === "wall") &&
+    room.matter.engine.world.bodies.some((entry) => entry.label === "mallet-0");
+  rooms.delete(room.code);
+
+  return {
+    puck,
+    synced,
+    bounced,
+    matterActive,
+    passed: Boolean(synced && bounced && matterActive)
   };
 }
 
