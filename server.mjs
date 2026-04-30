@@ -61,13 +61,15 @@ const STRONG_STRIKE_MIN_SPEED = 160;
 const STRIKE_ESCAPE_TRANSFER = 0.38;
 const STRONG_SWEEP_TANGENTIAL_TRANSFER = 0.08;
 const STRONG_SWEEP_TANGENTIAL_MAX = 180;
+const MATTER_MALLET_MASS = 1200;
+const MATTER_MALLET_SYNC_EPSILON = 0.001;
+const MATTER_MALLET_CONTACT_ADVANCE = 1.6;
 const MATTER_SWEEP_SAMPLES = 12;
 const MATTER_SWEEP_BINARY_STEPS = 12;
 const PUCK_SUBSTEPS = 14;
 const IMMEDIATE_HIT_STATE_GAP_MS = 6;
 const INPUT_STATE_GAP_MS = 8;
 const MALLET_RELEASE_LOCK_MS = 72;
-const MALLET_DIRECT_INPUT_LOCK_MS = 38;
 const FRICTION_PER_SECOND = 0.985;
 const PUCK_LINEAR_FRICTION = 18;
 const PUCK_STOP_SPEED = 16;
@@ -629,12 +631,24 @@ function createMatterSimulation() {
   const engine = Matter.Engine.create({ enableSleeping: false });
   engine.gravity.x = 0;
   engine.gravity.y = 0;
-  return {
+  const simulation = {
     engine,
     puckBodies: new Map(),
     malletBodies: [],
-    wallBodies: []
+    wallBodies: [],
+    collisions: []
   };
+  Matter.Events.on(engine, "collisionStart", (event) => {
+    for (const pair of event.pairs || []) {
+      simulation.collisions.push({ bodyA: pair.bodyA, bodyB: pair.bodyB });
+    }
+  });
+  Matter.Events.on(engine, "collisionActive", (event) => {
+    for (const pair of event.pairs || []) {
+      simulation.collisions.push({ bodyA: pair.bodyA, bodyB: pair.bodyB });
+    }
+  });
+  return simulation;
 }
 
 function resetMatterWorld(room) {
@@ -677,19 +691,22 @@ function createMatterWallBodies() {
 }
 
 function createMatterMalletBody(mallet, index) {
-  return Matter.Bodies.circle(mallet.x, mallet.y, TABLE.malletRadius, {
-    isStatic: true,
+  const body = Matter.Bodies.circle(mallet.x, mallet.y, TABLE.malletRadius, {
     restitution: MALLET_RESTITUTION,
     friction: 0,
     frictionStatic: 0,
     frictionAir: 0,
     label: `mallet-${index}`
   });
+  Matter.Body.setMass(body, MATTER_MALLET_MASS);
+  Matter.Body.setInertia(body, Infinity);
+  Matter.Body.setVelocity(body, { x: (mallet.vx || 0) / 60, y: (mallet.vy || 0) / 60 });
+  return body;
 }
 
 function createMatterPuckBody(puck) {
   const body = Matter.Bodies.circle(puck.x, puck.y, TABLE.puckRadius, {
-    restitution: WALL_RESTITUTION,
+    restitution: PUCK_RESTITUTION,
     friction: 0,
     frictionStatic: 0,
     frictionAir: 0,
@@ -743,19 +760,197 @@ function syncPuckFromMatterBody(room, puck) {
   puck.vy = body.velocity.y * 60;
 }
 
-function syncMatterMalletBodies(room) {
+function ensureMatterMalletBodies(room) {
   if (!room?.matter) return;
   if (room.matter.malletBodies.length !== room.state.mallets.length) {
     resetMatterWorld(room);
     syncMatterPuckBodies(room);
   }
+}
+
+function syncMatterMalletBody(room, index, { snap = false } = {}) {
+  ensureMatterMalletBodies(room);
+  const mallet = room?.state?.mallets?.[index];
+  const body = room?.matter?.malletBodies?.[index];
+  if (!mallet || !body) return;
+  if (snap) {
+    Matter.Body.setPosition(body, { x: mallet.x, y: mallet.y });
+  }
+  const driveVx = Number.isFinite(mallet.matterDriveVx) ? mallet.matterDriveVx : 0;
+  const driveVy = Number.isFinite(mallet.matterDriveVy) ? mallet.matterDriveVy : 0;
+  Matter.Body.setVelocity(body, { x: driveVx / 60, y: driveVy / 60 });
+  Matter.Body.setAngularVelocity(body, 0);
+}
+
+function driveMatterMalletBodies(room) {
+  ensureMatterMalletBodies(room);
+  for (let index = 0; index < room.state.mallets.length; index += 1) {
+    syncMatterMalletBody(room, index);
+  }
+}
+
+function syncMalletsFromMatterBodies(room) {
+  ensureMatterMalletBodies(room);
   for (let index = 0; index < room.state.mallets.length; index += 1) {
     const mallet = room.state.mallets[index];
     const body = room.matter.malletBodies[index];
     if (!body) continue;
-    Matter.Body.setPosition(body, { x: mallet.x, y: mallet.y });
-    Matter.Body.setVelocity(body, { x: (mallet.vx || 0) / 60, y: (mallet.vy || 0) / 60 });
+
+    const constrained = constrainMallet(index, body.position.x, body.position.y);
+    const clampedX = Math.abs(constrained.x - body.position.x) > MATTER_MALLET_SYNC_EPSILON;
+    const clampedY = Math.abs(constrained.y - body.position.y) > MATTER_MALLET_SYNC_EPSILON;
+    if (clampedX || clampedY) {
+      Matter.Body.setPosition(body, constrained);
+      Matter.Body.setVelocity(body, {
+        x: clampedX ? 0 : body.velocity.x,
+        y: clampedY ? 0 : body.velocity.y
+      });
+      Matter.Body.setAngularVelocity(body, 0);
+    }
+
+    mallet.x = constrained.x;
+    mallet.y = constrained.y;
+    mallet.vx = body.velocity.x * 60;
+    mallet.vy = body.velocity.y * 60;
   }
+}
+
+function processMatterCollisionEvents(room) {
+  const events = room?.matter?.collisions || [];
+  const now = Date.now();
+  const pucksById = new Map((room.state.pucks || []).map((puck) => [puck.id, puck]));
+  const handled = new Set();
+
+  for (const event of events) {
+    const match = matterMalletPuckCollision(event.bodyA, event.bodyB, pucksById);
+    if (!match) continue;
+    handled.add(`${match.malletIndex}:${match.puck.id}`);
+    markMatterMalletContact(room, match, now, true);
+  }
+
+  for (let malletIndex = 0; malletIndex < (room.matter?.malletBodies?.length || 0); malletIndex += 1) {
+    const malletBody = room.matter.malletBodies[malletIndex];
+    if (!malletBody) continue;
+    for (const [puckId, puckBody] of room.matter.puckBodies) {
+      const puck = pucksById.get(puckId);
+      if (!puck || handled.has(`${malletIndex}:${puck.id}`)) continue;
+      const distance = Math.hypot(
+        puckBody.position.x - malletBody.position.x,
+        puckBody.position.y - malletBody.position.y
+      );
+      if (distance > TABLE.malletRadius + TABLE.puckRadius + HARD_CONTACT_SEPARATION + CONTACT_SLOP) continue;
+      const match = { malletIndex, malletBody, puckBody, puck };
+      if (isMatterMalletDrivingPuck(match)) {
+        markMatterMalletContact(room, match, now, false);
+      }
+    }
+  }
+}
+
+function isMatterMalletDrivingPuck({ malletIndex, malletBody, puckBody }) {
+  const normal = matterContactNormal(malletBody, puckBody, malletIndex);
+  const malletVx = malletBody.velocity.x * 60;
+  const malletVy = malletBody.velocity.y * 60;
+  const puckVx = puckBody.velocity.x * 60;
+  const puckVy = puckBody.velocity.y * 60;
+  const malletSpeed = Math.hypot(malletVx, malletVy);
+  const strikeSpeed = Math.max(0, malletVx * normal.nx + malletVy * normal.ny);
+  const relativeNormalSpeed = (puckVx - malletVx) * normal.nx + (puckVy - malletVy) * normal.ny;
+  return strikeSpeed > 90 || malletSpeed > 320 || relativeNormalSpeed < -30;
+}
+
+function markMatterMalletContact(room, { malletIndex, malletBody, puck, puckBody }, now, force) {
+  const recentSameHit =
+    puck.lastMalletHitIndex === malletIndex && now - (puck.lastMalletHitAt || 0) < MALLET_HIT_COOLDOWN_MS;
+  if (recentSameHit) return false;
+
+  const normal = matterContactNormal(malletBody, puckBody, malletIndex);
+  const { nx, ny } = normal;
+  const malletVx = malletBody.velocity.x * 60;
+  const malletVy = malletBody.velocity.y * 60;
+  const puckVx = puckBody.velocity.x * 60;
+  const puckVy = puckBody.velocity.y * 60;
+  const malletSpeed = Math.hypot(malletVx, malletVy);
+  const strikeSpeed = Math.max(0, malletVx * nx + malletVy * ny);
+  const puckNormalSpeed = puckVx * nx + puckVy * ny;
+  const targetNormalSpeed = Math.max(
+    force ? PUCK_MIN_LIVE_SPEED : 0,
+    strikeSpeed * MALLET_STRIKE_TRANSFER,
+    malletSpeed > 320 ? STATIC_SWEEP_MIN_SPEED : 0
+  );
+  if (puckNormalSpeed < targetNormalSpeed) {
+    const carry = targetNormalSpeed - puckNormalSpeed;
+    Matter.Body.setVelocity(puckBody, {
+      x: (puckVx + nx * carry) / 60,
+      y: (puckVy + ny * carry) / 60
+    });
+    capMatterPuckBodySpeed(puckBody);
+  }
+
+  puck.lastMalletHitIndex = malletIndex;
+  puck.lastMalletHitAt = now;
+  puck.hitSerial = ((puck.hitSerial || 0) + 1) & 0xff;
+  rememberMalletRelease(puck, malletIndex, nx, ny, now);
+  emitFx(room, "hit", false, clamp((Math.max(strikeSpeed, malletSpeed * 0.4) || 1) / 3500, 0.14, 0.86));
+  return true;
+}
+
+function matterContactNormal(malletBody, puckBody, malletIndex) {
+  let nx = puckBody.position.x - malletBody.position.x;
+  let ny = puckBody.position.y - malletBody.position.y;
+  let distance = Math.hypot(nx, ny);
+  if (distance <= 0.001) {
+    nx = puckBody.velocity.x - malletBody.velocity.x;
+    ny = puckBody.velocity.y - malletBody.velocity.y;
+    distance = Math.hypot(nx, ny);
+  }
+  if (distance <= 0.001) {
+    nx = 0;
+    ny = malletIndex === 0 ? -1 : 1;
+    distance = 1;
+  }
+  return {
+    nx: nx / distance,
+    ny: ny / distance
+  };
+}
+
+function matterMalletPuckCollision(bodyA, bodyB, pucksById) {
+  const aMalletIndex = matterMalletIndex(bodyA);
+  const bMalletIndex = matterMalletIndex(bodyB);
+  if (aMalletIndex !== null && pucksById.has(bodyB.label)) {
+    return {
+      malletIndex: aMalletIndex,
+      malletBody: bodyA,
+      puckBody: bodyB,
+      puck: pucksById.get(bodyB.label)
+    };
+  }
+  if (bMalletIndex !== null && pucksById.has(bodyA.label)) {
+    return {
+      malletIndex: bMalletIndex,
+      malletBody: bodyB,
+      puckBody: bodyA,
+      puck: pucksById.get(bodyA.label)
+    };
+  }
+  return null;
+}
+
+function matterMalletIndex(body) {
+  const match = /^mallet-(\d+)$/.exec(body?.label || "");
+  return match ? Number(match[1]) : null;
+}
+
+function capMatterPuckBodySpeed(body) {
+  const vx = body.velocity.x * 60;
+  const vy = body.velocity.y * 60;
+  const speed = Math.hypot(vx, vy);
+  if (speed <= PUCK_MAX_SPEED || speed <= 0.001) return;
+  Matter.Body.setVelocity(body, {
+    x: ((vx / speed) * PUCK_MAX_SPEED) / 60,
+    y: ((vy / speed) * PUCK_MAX_SPEED) / 60
+  });
 }
 
 function startRoom(room) {
@@ -944,8 +1139,12 @@ function updateInput(client, message) {
   if (room.state.phase !== "playing") {
     constrained = constrainMalletAwayFromPucks(playerIndex, constrained.x, constrained.y, room.state.pucks);
   }
-  const previousX = mallet.x;
-  const previousY = mallet.y;
+  ensureMatterMalletBodies(room);
+  const body = room.matter?.malletBodies?.[playerIndex];
+  const previousX = body?.position.x ?? mallet.x;
+  const previousY = body?.position.y ?? mallet.y;
+  mallet.x = previousX;
+  mallet.y = previousY;
   const elapsed = mallet.lastInputAt ? (now - mallet.lastInputAt) / 1000 : 1 / PHYSICS_HZ;
   const inputDt = clamp(elapsed, 1 / 300, 1 / 24);
   const limited = limitPointStep(
@@ -967,28 +1166,18 @@ function updateInput(client, message) {
     mallet.sweepStartedAt = mallet.lastInputAt || now - inputDt * 1000;
     mallet.hasPendingSweep = true;
   }
-  if (room.state.phase === "playing" && Math.hypot(dx, dy) > 0.001) {
-    applyDirectInputSweep(
-      room,
-      mallet,
-      playerIndex,
-      limited.x,
-      limited.y,
-      inputDt,
-      now,
-      baseVx,
-      baseVy
-    );
-  } else {
+  if (room.state.phase !== "playing") {
     mallet.x = limited.x;
     mallet.y = limited.y;
+    syncMatterMalletBody(room, playerIndex, { snap: true });
   }
   mallet.targetX = constrained.x;
   mallet.targetY = constrained.y;
   mallet.vx = baseVx;
   mallet.vy = baseVy;
+  mallet.matterDriveVx = 0;
+  mallet.matterDriveVy = 0;
   mallet.lastInputAt = now;
-  mallet.directInputUntil = now + MALLET_DIRECT_INPUT_LOCK_MS;
   client.lastInputSeq = Number(message.inputSeq) || client.lastInputSeq || 0;
 
   room.updatedAt = now;
@@ -1009,6 +1198,9 @@ function applyDirectInputSweep(room, mallet, malletIndex, targetX, targetY, inpu
   mallet.y = guarded.y;
   mallet.vx = baseVx;
   mallet.vy = baseVy;
+  mallet.matterDriveVx = 0;
+  mallet.matterDriveVy = 0;
+  syncMatterMalletBody(room, malletIndex, { snap: true });
 
   const anyHit = resolveInputHits(room, mallet, malletIndex, sweepDt, false);
 
@@ -1175,6 +1367,8 @@ function tickRooms() {
       mallet.sweepFromY = mallet.y;
       mallet.sweepStartedAt = 0;
       mallet.hasPendingSweep = false;
+      mallet.matterDriveVx = 0;
+      mallet.matterDriveVy = 0;
     }
   }
 }
@@ -1182,17 +1376,21 @@ function tickRooms() {
 
 function moveMallets(room, dt) {
   const state = room.state;
+  ensureMatterMalletBodies(room);
   for (let index = 0; index < state.mallets.length; index += 1) {
     const mallet = state.mallets[index];
-    if (mallet.directInputUntil && Date.now() < mallet.directInputUntil) continue;
+    const body = room.matter?.malletBodies?.[index];
+    const previousX = body?.position.x ?? mallet.x;
+    const previousY = body?.position.y ?? mallet.y;
+    mallet.x = previousX;
+    mallet.y = previousY;
+
     const target = constrainMallet(index, mallet.targetX, mallet.targetY);
     const dx = target.x - mallet.x;
     const dy = target.y - mallet.y;
     const distance = Math.hypot(dx, dy);
     const speedLimit = mallet.maxSpeed || MALLET_MAX_SPEED;
     const maxMove = speedLimit * dt;
-    const previousX = mallet.x;
-    const previousY = mallet.y;
     mallet.sweepFromX = previousX;
     mallet.sweepFromY = previousY;
 
@@ -1203,15 +1401,36 @@ function moveMallets(room, dt) {
             y: mallet.y + (dy / distance) * maxMove
           }
         : target;
+    if (state.phase !== "playing") {
+      mallet.x = desired.x;
+      mallet.y = desired.y;
+      mallet.vx = (mallet.x - previousX) / dt;
+      mallet.vy = (mallet.y - previousY) / dt;
+      mallet.matterDriveVx = 0;
+      mallet.matterDriveVy = 0;
+      syncMatterMalletBody(room, index, { snap: true });
+      continue;
+    }
+
     const guarded =
       state.phase === "playing"
         ? guardMalletSweepWithMatter(room, index, previousX, previousY, desired.x, desired.y)
         : { x: desired.x, y: desired.y };
-    mallet.x = guarded.x;
-    mallet.y = guarded.y;
+    const driveTarget =
+      guarded.blocked && distance > 0.001
+        ? constrainMallet(
+            index,
+            guarded.x + (dx / distance) * MATTER_MALLET_CONTACT_ADVANCE,
+            guarded.y + (dy / distance) * MATTER_MALLET_CONTACT_ADVANCE
+          )
+        : guarded;
 
-    mallet.vx = (mallet.x - previousX) / dt;
-    mallet.vy = (mallet.y - previousY) / dt;
+    const driveVx = (driveTarget.x - previousX) / dt;
+    const driveVy = (driveTarget.y - previousY) / dt;
+    mallet.vx = driveVx;
+    mallet.vy = driveVy;
+    mallet.matterDriveVx = driveVx;
+    mallet.matterDriveVy = driveVy;
   }
 }
 
@@ -1247,7 +1466,7 @@ function stepPucks(room, dt) {
   const activePucks = [];
 
   syncMatterPuckBodies(room);
-  syncMatterMalletBodies(room);
+  driveMatterMalletBodies(room);
   for (const puck of state.pucks) {
     puck.prevX = puck.x;
     puck.prevY = puck.y;
@@ -1256,7 +1475,10 @@ function stepPucks(room, dt) {
     syncMatterPuckBody(room, puck);
   }
 
+  room.matter.collisions.length = 0;
   Matter.Engine.update(room.matter.engine, dt * 1000);
+  processMatterCollisionEvents(room);
+  syncMalletsFromMatterBodies(room);
 
   for (const puck of state.pucks) {
     syncPuckFromMatterBody(room, puck);
@@ -2110,6 +2332,8 @@ function initialState(puckCount = 1) {
         sweepFromY: bottomStart.y,
         vx: 0,
         vy: 0,
+        matterDriveVx: 0,
+        matterDriveVy: 0,
         lastInputAt: 0,
         sweepStartedAt: 0,
         hasPendingSweep: false
@@ -2123,6 +2347,8 @@ function initialState(puckCount = 1) {
         sweepFromY: topStart.y,
         vx: 0,
         vy: 0,
+        matterDriveVx: 0,
+        matterDriveVy: 0,
         lastInputAt: 0,
         sweepStartedAt: 0,
         hasPendingSweep: false
@@ -2151,6 +2377,8 @@ function centerMallets(state) {
     mallet.sweepFromY = starts[index].y;
     mallet.vx = 0;
     mallet.vy = 0;
+    mallet.matterDriveVx = 0;
+    mallet.matterDriveVy = 0;
     mallet.lastInputAt = 0;
     mallet.sweepStartedAt = 0;
     mallet.hasPendingSweep = false;
@@ -2577,6 +2805,24 @@ export function runRepeatedContactReleaseSelfTest() {
   };
 }
 
+function stepMatterSelfTestRoom(room, frames = 1) {
+  for (let frame = 0; frame < frames; frame += 1) {
+    moveMallets(room, DT);
+    if (room.state.phase === "playing") settlePuckMalletOverlaps(room);
+    for (let substep = 0; substep < PUCK_SUBSTEPS && room.state.phase === "playing"; substep += 1) {
+      stepPucks(room, DT / PUCK_SUBSTEPS);
+    }
+    for (const mallet of room.state.mallets) {
+      mallet.sweepFromX = mallet.x;
+      mallet.sweepFromY = mallet.y;
+      mallet.sweepStartedAt = 0;
+      mallet.hasPendingSweep = false;
+      mallet.matterDriveVx = 0;
+      mallet.matterDriveVy = 0;
+    }
+  }
+}
+
 export function runDirectInputNoSwallowSelfTest() {
   const now = Date.now();
   const initialPuckX = TABLE.width / 2;
@@ -2611,6 +2857,8 @@ export function runDirectInputNoSwallowSelfTest() {
   mallet.sweepFromY = mallet.y;
   mallet.sweepStartedAt = mallet.lastInputAt;
   mallet.hasPendingSweep = true;
+  resetMatterWorld(room);
+  syncMatterPuckBodies(room);
 
   const client = {
     id: "self-test-client",
@@ -2624,6 +2872,7 @@ export function runDirectInputNoSwallowSelfTest() {
     y: TABLE.height * 0.72,
     inputSeq: 1
   });
+  stepMatterSelfTestRoom(room, 3);
   sendRoomState(room, now, true);
 
   const snapshot = publicState(room.state);
@@ -2632,7 +2881,8 @@ export function runDirectInputNoSwallowSelfTest() {
   const distance = Math.hypot(puck.x - publicMallet.x, puck.y - publicMallet.y);
   const targetDistance = TABLE.malletRadius + TABLE.puckRadius + HARD_CONTACT_SEPARATION;
   const speed = Math.hypot(puck.vx, puck.vy);
-  const malletStayedOnImpactSide = publicMallet.x <= initialPuckX - TABLE.malletRadius - TABLE.puckRadius + 0.02;
+  const malletStayedOnImpactSide =
+    publicMallet.x <= puck.x - TABLE.malletRadius - TABLE.puckRadius + HARD_CONTACT_SEPARATION + 0.02;
   rooms.delete(room.code);
 
   return {
@@ -2645,8 +2895,105 @@ export function runDirectInputNoSwallowSelfTest() {
     passed:
       distance >= targetDistance - 0.02 &&
       malletStayedOnImpactSide &&
+      puck.lastMalletHitIndex === 0 &&
+      puck.hitSerial > 0 &&
       speed <= PUCK_MAX_SPEED + 0.001 &&
       puck.x !== publicMallet.x
+  };
+}
+
+export function runDynamicMalletMatterSelfTest() {
+  const cases = [0, 1].map((malletIndex) => {
+    const room = makeRoom({ puckCount: 1, lan: true });
+    room.players = [null, null];
+    room.state.phase = "playing";
+    const direction = malletIndex === 0 ? 1 : -1;
+    const puckY = malletIndex === 0 ? TABLE.height * 0.72 : TABLE.height * 0.28;
+    const initialPuck = {
+      id: `dynamic-mallet-${malletIndex}`,
+      x: TABLE.width / 2,
+      y: puckY,
+      prevX: TABLE.width / 2,
+      prevY: puckY,
+      vx: 0,
+      vy: 0,
+      stuckFor: 0,
+      lastMalletHitIndex: null,
+      lastMalletHitAt: 0,
+      hitSerial: 0
+    };
+    room.state.pucks = [initialPuck];
+    const mallet = room.state.mallets[malletIndex];
+    mallet.x = TABLE.width / 2;
+    mallet.y = puckY + direction * 100;
+    mallet.targetX = mallet.x;
+    mallet.targetY = mallet.y;
+    mallet.vx = 0;
+    mallet.vy = 0;
+    mallet.matterDriveVx = 0;
+    mallet.matterDriveVy = 0;
+    mallet.lastInputAt = Date.now() - 12;
+    mallet.sweepFromX = mallet.x;
+    mallet.sweepFromY = mallet.y;
+    mallet.sweepStartedAt = mallet.lastInputAt;
+    mallet.hasPendingSweep = true;
+    resetMatterWorld(room);
+    syncMatterPuckBodies(room);
+
+    const client = {
+      id: `dynamic-mallet-client-${malletIndex}`,
+      roomCode: room.code,
+      playerIndex: malletIndex,
+      lastInputSeq: 0
+    };
+    updateInput(client, {
+      playerIndex: malletIndex,
+      x: TABLE.width / 2,
+      y: puckY - direction * 100,
+      inputSeq: 1
+    });
+    stepMatterSelfTestRoom(room, 3);
+
+    const puck = room.state.pucks[0];
+    const body = room.matter.malletBodies[malletIndex];
+    const distance = Math.hypot(puck.x - mallet.x, puck.y - mallet.y);
+    const minDistance = TABLE.malletRadius + TABLE.puckRadius + HARD_CONTACT_SEPARATION;
+    const speed = Math.hypot(puck.vx, puck.vy);
+    const stayedOnContactSide =
+      malletIndex === 0
+        ? mallet.y >= puck.y + TABLE.malletRadius + TABLE.puckRadius - 1.5
+        : mallet.y <= puck.y - TABLE.malletRadius - TABLE.puckRadius + 1.5;
+    const bodySynced =
+      body &&
+      !body.isStatic &&
+      body.mass >= MATTER_MALLET_MASS * 0.99 &&
+      Math.abs(body.position.x - mallet.x) < 0.001 &&
+      Math.abs(body.position.y - mallet.y) < 0.001;
+    rooms.delete(room.code);
+
+    return {
+      malletIndex,
+      distance,
+      minDistance,
+      speed,
+      stayedOnContactSide,
+      bodySynced,
+      puck,
+      mallet,
+      passed:
+        bodySynced &&
+        stayedOnContactSide &&
+        distance >= minDistance - 0.02 &&
+        puck.lastMalletHitIndex === malletIndex &&
+        puck.hitSerial > 0 &&
+        speed >= PUCK_MIN_LIVE_SPEED &&
+        speed <= PUCK_MAX_SPEED + 0.001
+    };
+  });
+
+  return {
+    cases,
+    passed: cases.every((entry) => entry.passed)
   };
 }
 
@@ -2739,6 +3086,13 @@ export function runServerMatterWorldSelfTest() {
     room.matter.engine.world.bodies.includes(body) &&
     room.matter.engine.world.bodies.some((entry) => entry.label === "wall") &&
     room.matter.engine.world.bodies.some((entry) => entry.label === "mallet-0");
+  const malletBody = room.matter.malletBodies[0];
+  const dynamicMallet =
+    malletBody &&
+    !malletBody.isStatic &&
+    malletBody.mass >= MATTER_MALLET_MASS * 0.99 &&
+    Number.isFinite(malletBody.inverseMass) &&
+    malletBody.inverseMass > 0;
   rooms.delete(room.code);
 
   return {
@@ -2746,7 +3100,8 @@ export function runServerMatterWorldSelfTest() {
     synced,
     bounced,
     matterActive,
-    passed: Boolean(synced && bounced && matterActive)
+    dynamicMallet,
+    passed: Boolean(synced && bounced && matterActive && dynamicMallet)
   };
 }
 
