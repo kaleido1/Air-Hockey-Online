@@ -309,7 +309,6 @@ let nextInputSeq = 1;
 let lastAckInputSeq = 0;
 let lastLocalHitFxAt = 0;
 let lastServerTickExtended = null;
-let interpolationDelayMs = 16;
 
 applyLanguage();
 startRefreshRateSampling();
@@ -1770,7 +1769,6 @@ function clearRoom() {
   nextInputSeq = 1;
   lastAckInputSeq = 0;
   lastServerTickExtended = null;
-  interpolationDelayMs = 16;
   els.roomCode.textContent = "-";
   els.roomPill.textContent = t("offline");
   els.youLabel.textContent = t("you");
@@ -2251,14 +2249,6 @@ function rememberStateSnapshot(message) {
     state: cloneSnapshotState(message.state)
   });
   while (stateSnapshots.length > 5) stateSnapshots.shift();
-  if (stateSnapshots.length >= 2) {
-    const previous = stateSnapshots[stateSnapshots.length - 2];
-    const latest = stateSnapshots[stateSnapshots.length - 1];
-    const spacingMs = latest.serverTime - previous.serverTime;
-    const arrivalJitter = Math.abs((latest.receivedAt - previous.receivedAt) - spacingMs);
-    const targetDelay = clamp(spacingMs * 1.35 + arrivalJitter * 0.55 + measuredRttMs * 0.04, 10, 34);
-    interpolationDelayMs = lerp(interpolationDelayMs, targetDelay, 0.28);
-  }
 }
 
 function cloneSnapshotState(state) {
@@ -2276,54 +2266,7 @@ function renderState() {
   if (serverState.phase !== "playing" || stateSnapshots.length < 2) return serverState;
 
   const newest = stateSnapshots[stateSnapshots.length - 1];
-  const targetTime = newest.serverTime - interpolationDelayMs;
-
-  let previous = stateSnapshots[0];
-  let next = newest;
-  for (let index = 1; index < stateSnapshots.length; index += 1) {
-    const candidate = stateSnapshots[index];
-    if (candidate.serverTime >= targetTime) {
-      previous = stateSnapshots[index - 1] || candidate;
-      next = candidate;
-      break;
-    }
-    previous = candidate;
-    next = candidate;
-  }
-
-  if (!previous || !next) return serverState;
-  if (previous === next) return next.state;
-  if (previous.state.phase !== next.state.phase) return next.state;
-
-  const spanMs = Math.max(1, next.serverTime - previous.serverTime);
-  const alpha = clamp((targetTime - previous.serverTime) / spanMs, 0, 1);
-  return interpolateState(previous.state, next.state, alpha);
-}
-
-function interpolateState(fromState, toState, alpha) {
-  return {
-    ...toState,
-    mallets: toState.mallets.map((mallet, index) => {
-      const from = fromState.mallets[index];
-      if (!from) return mallet;
-      return interpolateBody(from, mallet, alpha);
-    }),
-    pucks: toState.pucks.map((puck) => {
-      const from = fromState.pucks.find((candidate) => candidate.id === puck.id);
-      if (!from) return puck;
-      return interpolateBody(from, puck, alpha);
-    })
-  };
-}
-
-function interpolateBody(from, to, alpha) {
-  return {
-    ...to,
-    x: lerp(from.x, to.x, alpha),
-    y: lerp(from.y, to.y, alpha),
-    vx: lerp(from.vx || 0, to.vx || 0, alpha),
-    vy: lerp(from.vy || 0, to.vy || 0, alpha)
-  };
+  return newest.state;
 }
 
 function displayPuck(puck) {
