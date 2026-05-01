@@ -42,6 +42,7 @@ const SNAPSHOT_HZ = readTickHz("AIR_HOCKEY_SNAPSHOT_HZ", 60, 60, Math.min(240, P
 const DT = 1 / PHYSICS_HZ;
 const HUMAN_MALLET_BASE_SPEED = 4200;
 const HUMAN_MALLET_INPUT_SPEED_SCALE = 1.15;
+const HUMAN_MALLET_MAX_SPEED = 9000;
 const HUMAN_MALLET_SPEED_HOLD_MS = 120;
 const BOT_MIN_SPEED = 1700;
 const BOT_MAX_SPEED = 3400;
@@ -822,6 +823,30 @@ function syncMalletsFromMatterBodies(room) {
   }
 }
 
+function authoritativeMalletStrikeVelocity(room, malletIndex, malletBody, normal = null) {
+  const mallet = room?.state?.mallets?.[malletIndex];
+  const bodyVx = malletBody.velocity.x * 60;
+  const bodyVy = malletBody.velocity.y * 60;
+  const driveVx = Number.isFinite(mallet?.matterStrikeVx)
+    ? mallet.matterStrikeVx
+    : Number.isFinite(mallet?.matterDriveVx)
+      ? mallet.matterDriveVx
+      : bodyVx;
+  const driveVy = Number.isFinite(mallet?.matterStrikeVy)
+    ? mallet.matterStrikeVy
+    : Number.isFinite(mallet?.matterDriveVy)
+      ? mallet.matterDriveVy
+      : bodyVy;
+  if (normal) {
+    const bodyStrikeSpeed = Math.max(0, bodyVx * normal.nx + bodyVy * normal.ny);
+    const driveStrikeSpeed = Math.max(0, driveVx * normal.nx + driveVy * normal.ny);
+    return driveStrikeSpeed > bodyStrikeSpeed ? { vx: driveVx, vy: driveVy } : { vx: bodyVx, vy: bodyVy };
+  }
+  const driveSpeed = Math.hypot(driveVx, driveVy);
+  const bodySpeed = Math.hypot(bodyVx, bodyVy);
+  return driveSpeed > bodySpeed ? { vx: driveVx, vy: driveVy } : { vx: bodyVx, vy: bodyVy };
+}
+
 function processMatterCollisionEvents(room) {
   const events = room?.matter?.collisions || [];
   const now = Date.now();
@@ -847,17 +872,18 @@ function processMatterCollisionEvents(room) {
       );
       if (distance > TABLE.malletRadius + TABLE.puckRadius + HARD_CONTACT_SEPARATION + CONTACT_SLOP) continue;
       const match = { malletIndex, malletBody, puckBody, puck };
-      if (isMatterMalletDrivingPuck(match)) {
+      if (isMatterMalletDrivingPuck(room, match)) {
         markMatterMalletContact(room, match, now, false);
       }
     }
   }
 }
 
-function isMatterMalletDrivingPuck({ malletIndex, malletBody, puckBody }) {
+function isMatterMalletDrivingPuck(room, { malletIndex, malletBody, puckBody }) {
   const normal = matterContactNormal(malletBody, puckBody, malletIndex);
-  const malletVx = malletBody.velocity.x * 60;
-  const malletVy = malletBody.velocity.y * 60;
+  const mallet = authoritativeMalletStrikeVelocity(room, malletIndex, malletBody, normal);
+  const malletVx = mallet.vx;
+  const malletVy = mallet.vy;
   const puckVx = puckBody.velocity.x * 60;
   const puckVy = puckBody.velocity.y * 60;
   const malletSpeed = Math.hypot(malletVx, malletVy);
@@ -873,8 +899,9 @@ function markMatterMalletContact(room, { malletIndex, malletBody, puck, puckBody
 
   const normal = matterContactNormal(malletBody, puckBody, malletIndex);
   const { nx, ny } = normal;
-  const malletVx = malletBody.velocity.x * 60;
-  const malletVy = malletBody.velocity.y * 60;
+  const malletVelocity = authoritativeMalletStrikeVelocity(room, malletIndex, malletBody, normal);
+  const malletVx = malletVelocity.vx;
+  const malletVy = malletVelocity.vy;
   const puckVx = puckBody.velocity.x * 60;
   const puckVy = puckBody.velocity.y * 60;
   const malletSpeed = Math.hypot(malletVx, malletVy);
@@ -1209,7 +1236,14 @@ function normalizedHumanInputSpeed(message, fromX, fromY, targetX, targetY, dt) 
   const measuredSpeed = Math.hypot(targetX - fromX, targetY - fromY) / Math.max(dt, 1 / 300);
   const clientSpeed = Math.max(0, Number(message.inputSpeed) || 0);
   const requested = Math.max(HUMAN_MALLET_BASE_SPEED, measuredSpeed, clientSpeed * HUMAN_MALLET_INPUT_SPEED_SCALE);
-  return requested;
+  return clamp(requested, HUMAN_MALLET_BASE_SPEED, HUMAN_MALLET_MAX_SPEED);
+}
+
+function activeHumanMalletSpeedLimit(mallet, now = Date.now()) {
+  if (mallet?.inputSpeedUntil && now <= mallet.inputSpeedUntil) {
+    return clamp(Number(mallet.inputSpeedLimit) || HUMAN_MALLET_BASE_SPEED, HUMAN_MALLET_BASE_SPEED, HUMAN_MALLET_MAX_SPEED);
+  }
+  return HUMAN_MALLET_BASE_SPEED;
 }
 
 function applyDirectInputSweep(room, mallet, malletIndex, targetX, targetY, inputDt, now, baseVx, baseVy) {
@@ -1229,6 +1263,8 @@ function applyDirectInputSweep(room, mallet, malletIndex, targetX, targetY, inpu
   mallet.vy = baseVy;
   mallet.matterDriveVx = 0;
   mallet.matterDriveVy = 0;
+  mallet.matterStrikeVx = 0;
+  mallet.matterStrikeVy = 0;
   syncMatterMalletBody(room, malletIndex, { snap: true });
 
   const anyHit = resolveInputHits(room, mallet, malletIndex, sweepDt, false);
@@ -1418,12 +1454,13 @@ function moveMallets(room, dt) {
     const dx = target.x - mallet.x;
     const dy = target.y - mallet.y;
     const distance = Math.hypot(dx, dy);
-    const maxMove = mallet.maxSpeed ? mallet.maxSpeed * dt : Infinity;
+    const speedLimit = mallet.maxSpeed || activeHumanMalletSpeedLimit(mallet);
+    const maxMove = speedLimit * dt;
     mallet.sweepFromX = previousX;
     mallet.sweepFromY = previousY;
 
     const desired =
-      mallet.maxSpeed && distance > maxMove && distance > 0.001
+      distance > maxMove && distance > 0.001
         ? {
             x: mallet.x + (dx / distance) * maxMove,
             y: mallet.y + (dy / distance) * maxMove
@@ -1436,10 +1473,14 @@ function moveMallets(room, dt) {
       mallet.vy = (mallet.y - previousY) / dt;
       mallet.matterDriveVx = 0;
       mallet.matterDriveVy = 0;
+      mallet.matterStrikeVx = 0;
+      mallet.matterStrikeVy = 0;
       syncMatterMalletBody(room, index, { snap: true });
       continue;
     }
 
+    const strikeVx = (desired.x - previousX) / dt;
+    const strikeVy = (desired.y - previousY) / dt;
     const guarded =
       state.phase === "playing"
         ? guardMalletSweepWithMatter(room, index, previousX, previousY, desired.x, desired.y)
@@ -1459,6 +1500,8 @@ function moveMallets(room, dt) {
     mallet.vy = driveVy;
     mallet.matterDriveVx = driveVx;
     mallet.matterDriveVy = driveVy;
+    mallet.matterStrikeVx = strikeVx;
+    mallet.matterStrikeVy = strikeVy;
   }
 }
 
@@ -2362,6 +2405,8 @@ function initialState(puckCount = 1) {
         vy: 0,
         matterDriveVx: 0,
         matterDriveVy: 0,
+        matterStrikeVx: 0,
+        matterStrikeVy: 0,
         inputSpeedLimit: HUMAN_MALLET_BASE_SPEED,
         inputSpeedUntil: 0,
         lastInputAt: 0,
@@ -2379,6 +2424,8 @@ function initialState(puckCount = 1) {
         vy: 0,
         matterDriveVx: 0,
         matterDriveVy: 0,
+        matterStrikeVx: 0,
+        matterStrikeVy: 0,
         inputSpeedLimit: HUMAN_MALLET_BASE_SPEED,
         inputSpeedUntil: 0,
         lastInputAt: 0,
@@ -2411,6 +2458,8 @@ function centerMallets(state) {
     mallet.vy = 0;
     mallet.matterDriveVx = 0;
     mallet.matterDriveVy = 0;
+    mallet.matterStrikeVx = 0;
+    mallet.matterStrikeVy = 0;
     mallet.inputSpeedLimit = HUMAN_MALLET_BASE_SPEED;
     mallet.inputSpeedUntil = 0;
     mallet.lastInputAt = 0;
@@ -2966,6 +3015,8 @@ function stepMatterSelfTestRoom(room, frames = 1) {
       mallet.hasPendingSweep = false;
       mallet.matterDriveVx = 0;
       mallet.matterDriveVy = 0;
+      mallet.matterStrikeVx = 0;
+      mallet.matterStrikeVy = 0;
     }
   }
 }
@@ -3116,6 +3167,7 @@ export function runDynamicMalletMatterSelfTest() {
       body.mass >= MATTER_MALLET_MASS * 0.99 &&
       Math.abs(body.position.x - mallet.x) < 0.001 &&
       Math.abs(body.position.y - mallet.y) < 0.001;
+    const strongAuthoritativeHit = speed >= 2800;
     rooms.delete(room.code);
 
     return {
@@ -3123,6 +3175,7 @@ export function runDynamicMalletMatterSelfTest() {
       distance,
       minDistance,
       speed,
+      strongAuthoritativeHit,
       stayedOnContactSide,
       bodySynced,
       puck,
@@ -3133,7 +3186,7 @@ export function runDynamicMalletMatterSelfTest() {
         distance >= minDistance - 0.02 &&
         puck.lastMalletHitIndex === malletIndex &&
         puck.hitSerial > 0 &&
-        speed >= PUCK_MIN_LIVE_SPEED
+        strongAuthoritativeHit
     };
   });
 
@@ -3348,11 +3401,15 @@ export function runInputSpeedBudgetSelfTest() {
     legacyRequestedSpeed,
     fastMove,
     baseMovePerTick: HUMAN_MALLET_BASE_SPEED / PHYSICS_HZ,
+    maxMovePerTick: HUMAN_MALLET_MAX_SPEED / PHYSICS_HZ,
     passed:
       requestedSpeed > HUMAN_MALLET_BASE_SPEED &&
+      requestedSpeed <= HUMAN_MALLET_MAX_SPEED &&
       legacyRequestedSpeed >= HUMAN_MALLET_BASE_SPEED &&
+      legacyRequestedSpeed <= HUMAN_MALLET_MAX_SPEED &&
       fastMove > HUMAN_MALLET_BASE_SPEED / PHYSICS_HZ &&
-      fastMove >= 259.9
+      fastMove <= HUMAN_MALLET_MAX_SPEED / PHYSICS_HZ + 0.1 &&
+      fastMove >= HUMAN_MALLET_MAX_SPEED / PHYSICS_HZ - 0.1
   };
 }
 

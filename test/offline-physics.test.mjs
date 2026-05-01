@@ -257,6 +257,8 @@ const tests = [
 process.env.AIR_HOCKEY_NO_LISTEN = "1";
 const {
   runActiveDisconnectSelfTest,
+  runDynamicMalletMatterSelfTest,
+  runInputSpeedBudgetSelfTest,
   runSlowPuckNoHardStopSelfTest,
   runTickConfigSelfTest
 } = await import("../server.mjs");
@@ -276,7 +278,23 @@ function testServerUsesChosenTickRates() {
   assert.ok(result.passed, JSON.stringify(result));
 }
 
-tests.push(testActiveDisconnectClosesRemoteRoom, testServerSlowPuckIsNotHardStopped, testServerUsesChosenTickRates);
+function testServerDynamicMalletUsesAuthoritativeStrikeSpeed() {
+  const result = runDynamicMalletMatterSelfTest();
+  assert.ok(result.passed, JSON.stringify(result));
+}
+
+function testServerHumanInputSpeedBudgetIsBounded() {
+  const result = runInputSpeedBudgetSelfTest();
+  assert.ok(result.passed, JSON.stringify(result));
+}
+
+tests.push(
+  testActiveDisconnectClosesRemoteRoom,
+  testServerSlowPuckIsNotHardStopped,
+  testServerUsesChosenTickRates,
+  testServerDynamicMalletUsesAuthoritativeStrikeSpeed,
+  testServerHumanInputSpeedBudgetIsBounded
+);
 
 for (const test of tests) {
   await test();
