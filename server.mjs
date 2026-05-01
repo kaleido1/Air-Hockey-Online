@@ -37,8 +37,8 @@ const TABLE = {
   firstTo: 7
 };
 
-const PHYSICS_HZ = readTickHz("AIR_HOCKEY_PHYSICS_HZ", 60, 60, 480);
-const SNAPSHOT_HZ = readTickHz("AIR_HOCKEY_SNAPSHOT_HZ", 60, 60, Math.min(240, PHYSICS_HZ));
+const PHYSICS_HZ = readTickHz("AIR_HOCKEY_PHYSICS_HZ", 120, 60, 480);
+const SNAPSHOT_HZ = readTickHz("AIR_HOCKEY_SNAPSHOT_HZ", 120, 60, Math.min(240, PHYSICS_HZ));
 const DT = 1 / PHYSICS_HZ;
 const HUMAN_MALLET_BASE_SPEED = 4200;
 const HUMAN_MALLET_INPUT_SPEED_SCALE = 1.15;
@@ -1209,25 +1209,41 @@ function updateInput(client, message) {
   const dy = limited.y - previousY;
   const baseVx = dx / inputDt;
   const baseVy = dy / inputDt;
-  if (!mallet.hasPendingSweep) {
+  const strikeVelocity = limitVectorMagnitude(baseVx, baseVy, requestedSpeed);
+  const distance = Math.hypot(dx, dy);
+  const sweepDt = Math.max(inputDt, distance / Math.max(requestedSpeed, 1));
+  mallet.targetX = constrained.x;
+  mallet.targetY = constrained.y;
+  client.lastInputSeq = Number(message.inputSeq) || client.lastInputSeq || 0;
+
+  if (room.state.phase === "playing") {
+    applyDirectInputSweep(
+      room,
+      mallet,
+      playerIndex,
+      limited.x,
+      limited.y,
+      sweepDt,
+      now,
+      strikeVelocity.x,
+      strikeVelocity.y
+    );
+  } else {
+    mallet.x = limited.x;
+    mallet.y = limited.y;
     mallet.sweepFromX = previousX;
     mallet.sweepFromY = previousY;
     mallet.sweepStartedAt = mallet.lastInputAt || now - inputDt * 1000;
     mallet.hasPendingSweep = true;
-  }
-  if (room.state.phase !== "playing") {
-    mallet.x = limited.x;
-    mallet.y = limited.y;
+    mallet.vx = strikeVelocity.x;
+    mallet.vy = strikeVelocity.y;
+    mallet.matterDriveVx = 0;
+    mallet.matterDriveVy = 0;
+    mallet.matterStrikeVx = 0;
+    mallet.matterStrikeVy = 0;
     syncMatterMalletBody(room, playerIndex, { snap: true });
   }
-  mallet.targetX = constrained.x;
-  mallet.targetY = constrained.y;
-  mallet.vx = baseVx;
-  mallet.vy = baseVy;
-  mallet.matterDriveVx = 0;
-  mallet.matterDriveVy = 0;
   mallet.lastInputAt = now;
-  client.lastInputSeq = Number(message.inputSeq) || client.lastInputSeq || 0;
 
   room.updatedAt = now;
 }
@@ -1237,6 +1253,13 @@ function normalizedHumanInputSpeed(message, fromX, fromY, targetX, targetY, dt) 
   const clientSpeed = Math.max(0, Number(message.inputSpeed) || 0);
   const requested = Math.max(HUMAN_MALLET_BASE_SPEED, measuredSpeed, clientSpeed * HUMAN_MALLET_INPUT_SPEED_SCALE);
   return clamp(requested, HUMAN_MALLET_BASE_SPEED, HUMAN_MALLET_MAX_SPEED);
+}
+
+function limitVectorMagnitude(x, y, maxMagnitude) {
+  const magnitude = Math.hypot(x, y);
+  if (magnitude <= 0.001 || magnitude <= maxMagnitude) return { x, y };
+  const scale = maxMagnitude / magnitude;
+  return { x: x * scale, y: y * scale };
 }
 
 function activeHumanMalletSpeedLimit(mallet, now = Date.now()) {
@@ -2708,9 +2731,12 @@ function makeSelfTestSocket() {
     writable: true,
     destroyed: false,
     messages: [],
+    realtimeMessages: [],
     write(frame) {
       const message = decodeSelfTestTextFrame(frame);
       if (message) this.messages.push(message);
+      const realtimeMessage = decodeSelfTestRealtimeFrame(frame);
+      if (realtimeMessage) this.realtimeMessages.push(realtimeMessage);
       return true;
     },
     destroy() {
@@ -2724,8 +2750,24 @@ function makeSelfTestSocket() {
 }
 
 function decodeSelfTestTextFrame(frame) {
+  const payload = decodeSelfTestFramePayload(frame, 0x1);
+  if (!payload) return null;
+
+  try {
+    return JSON.parse(payload.toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function decodeSelfTestRealtimeFrame(frame) {
+  const payload = decodeSelfTestFramePayload(frame, 0x2);
+  return payload ? decodeRealtimePacket(payload, Date.now()) : null;
+}
+
+function decodeSelfTestFramePayload(frame, expectedOpcode) {
   const opcode = frame[0] & 0x0f;
-  if (opcode !== 0x1) return null;
+  if (opcode !== expectedOpcode) return null;
 
   let length = frame[1] & 0x7f;
   let offset = 2;
@@ -2736,12 +2778,7 @@ function decodeSelfTestTextFrame(frame) {
     length = Number(frame.readBigUInt64BE(offset));
     offset += 8;
   }
-
-  try {
-    return JSON.parse(frame.subarray(offset, offset + length).toString("utf8"));
-  } catch {
-    return null;
-  }
+  return frame.subarray(offset, offset + length);
 }
 
 function makeSelfTestClient(id) {
@@ -3309,8 +3346,8 @@ export function runTickConfigSelfTest() {
     physicsHz: PHYSICS_HZ,
     snapshotHz: SNAPSHOT_HZ,
     passed:
-      PHYSICS_HZ === 60 &&
-      SNAPSHOT_HZ === 60
+      PHYSICS_HZ === 120 &&
+      SNAPSHOT_HZ === 120
   };
 }
 
@@ -3373,8 +3410,8 @@ export function runInputSpeedBudgetSelfTest() {
     inputSpeed: 9000
   });
   const requestedSpeed = mallet.inputSpeedLimit;
-  stepMatterSelfTestRoom(room, 1);
-  const fastMove = Math.hypot(mallet.x - startX, mallet.y - startY);
+  const immediateMove = Math.hypot(mallet.x - startX, mallet.y - startY);
+  const strikeSpeed = Math.hypot(mallet.vx, mallet.vy);
 
   const legacyStartX = TABLE.width / 2 - 180;
   mallet.x = legacyStartX;
@@ -3394,22 +3431,78 @@ export function runInputSpeedBudgetSelfTest() {
     inputSeq: 2
   });
   const legacyRequestedSpeed = mallet.inputSpeedLimit;
+  const legacyStrikeSpeed = Math.hypot(mallet.vx, mallet.vy);
   rooms.delete(room.code);
 
   return {
     requestedSpeed,
     legacyRequestedSpeed,
-    fastMove,
+    immediateMove,
+    strikeSpeed,
+    legacyStrikeSpeed,
     baseMovePerTick: HUMAN_MALLET_BASE_SPEED / PHYSICS_HZ,
     maxMovePerTick: HUMAN_MALLET_MAX_SPEED / PHYSICS_HZ,
     passed:
       requestedSpeed > HUMAN_MALLET_BASE_SPEED &&
       requestedSpeed <= HUMAN_MALLET_MAX_SPEED &&
+      Math.abs(immediateMove - 260) < 0.1 &&
+      strikeSpeed <= HUMAN_MALLET_MAX_SPEED + 0.1 &&
+      strikeSpeed >= HUMAN_MALLET_MAX_SPEED - 0.1 &&
       legacyRequestedSpeed >= HUMAN_MALLET_BASE_SPEED &&
       legacyRequestedSpeed <= HUMAN_MALLET_MAX_SPEED &&
-      fastMove > HUMAN_MALLET_BASE_SPEED / PHYSICS_HZ &&
-      fastMove <= HUMAN_MALLET_MAX_SPEED / PHYSICS_HZ + 0.1 &&
-      fastMove >= HUMAN_MALLET_MAX_SPEED / PHYSICS_HZ - 0.1
+      legacyStrikeSpeed <= legacyRequestedSpeed + 0.1
+  };
+}
+
+export function runImmediateInputStateSelfTest() {
+  const client = makeSelfTestClient(`immediate-input-${crypto.randomBytes(4).toString("hex")}`);
+  const room = makeRoom({ puckCount: 1, lan: true });
+  room.players = [{ id: client.id, connected: true }, null];
+  room.state.phase = "playing";
+  room.state.pucks = [];
+
+  const mallet = room.state.mallets[0];
+  const startX = 210;
+  const startY = TABLE.height * 0.78;
+  const targetX = 390;
+  const targetY = startY;
+  mallet.x = startX;
+  mallet.y = startY;
+  mallet.targetX = startX;
+  mallet.targetY = startY;
+  mallet.vx = 0;
+  mallet.vy = 0;
+  mallet.lastInputAt = Date.now() - 16;
+  resetMatterWorld(room);
+
+  client.roomCode = room.code;
+  client.playerIndex = 0;
+  clients.set(client.id, client);
+  updateInput(client, {
+    playerIndex: 0,
+    x: targetX,
+    y: targetY,
+    inputSeq: 37,
+    inputSpeed: 9000
+  });
+
+  const stateMessage = client.socket.realtimeMessages.find((message) => message.type === "state");
+  const passed =
+    Math.abs(mallet.x - targetX) < 0.001 &&
+    Math.abs(mallet.y - targetY) < 0.001 &&
+    client.lastInputSeq === 37 &&
+    stateMessage?.ackInputSeq === 37 &&
+    stateMessage?.state?.mallets?.[0]?.x === targetX &&
+    stateMessage?.state?.mallets?.[0]?.y === Math.round(targetY);
+
+  clients.delete(client.id);
+  rooms.delete(room.code);
+
+  return {
+    mallet: { x: mallet.x, y: mallet.y },
+    ackInputSeq: stateMessage?.ackInputSeq,
+    stateMallet: stateMessage?.state?.mallets?.[0],
+    passed
   };
 }
 

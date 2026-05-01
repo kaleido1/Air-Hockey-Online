@@ -258,6 +258,7 @@ process.env.AIR_HOCKEY_NO_LISTEN = "1";
 const {
   runActiveDisconnectSelfTest,
   runDynamicMalletMatterSelfTest,
+  runImmediateInputStateSelfTest,
   runInputSpeedBudgetSelfTest,
   runSlowPuckNoHardStopSelfTest,
   runTickConfigSelfTest
@@ -288,12 +289,18 @@ function testServerHumanInputSpeedBudgetIsBounded() {
   assert.ok(result.passed, JSON.stringify(result));
 }
 
+function testServerAppliesInputImmediately() {
+  const result = runImmediateInputStateSelfTest();
+  assert.ok(result.passed, JSON.stringify(result));
+}
+
 tests.push(
   testActiveDisconnectClosesRemoteRoom,
   testServerSlowPuckIsNotHardStopped,
   testServerUsesChosenTickRates,
   testServerDynamicMalletUsesAuthoritativeStrikeSpeed,
-  testServerHumanInputSpeedBudgetIsBounded
+  testServerHumanInputSpeedBudgetIsBounded,
+  testServerAppliesInputImmediately
 );
 
 for (const test of tests) {

@@ -283,8 +283,12 @@ let puckSprite = null;
 let canvasMetrics = null;
 let currentCursor = "";
 const outgoingMalletTargets = new Map();
-let serverTickHz = Number(window.AIR_HOCKEY_PHYSICS_HZ) || 60;
-let serverSnapshotHz = Number(window.AIR_HOCKEY_SNAPSHOT_HZ) || 60;
+const pendingRealtimeInputs = new Map();
+let serverTickHz = Number(window.AIR_HOCKEY_PHYSICS_HZ) || 120;
+let serverSnapshotHz = Number(window.AIR_HOCKEY_SNAPSHOT_HZ) || 120;
+const REALTIME_INPUT_MAX_HZ = 120;
+const OFFLINE_POINTER_INPUT_HZ = 60;
+const ONLINE_MALLET_ECHO_MS = 180;
 const LOCAL_HUMAN_MALLET_BASE_SPEED = 4200;
 const LOCAL_HUMAN_MALLET_INPUT_SPEED_SCALE = 1.15;
 const LOCAL_HUMAN_MALLET_SPEED_HOLD_MS = 120;
@@ -629,6 +633,7 @@ function connect() {
   socket.addEventListener("close", () => {
     connected = false;
     clearTimeout(heartbeatTimer);
+    clearPendingRealtimeInputs();
     els.connectionStatus.textContent = t("offline");
     if (!offlineGame) setStatus("reconnecting");
     setButtons();
@@ -1788,7 +1793,7 @@ function applyPuckCorrection() {
 function sendPointer(event, force, overridePlayerIndex = null) {
   if (!isActivePlay()) return;
   if ((!roomCode && !offlineGame) || playerIndex === null) return;
-  const point = eventToTable(event);
+  const point = eventToTable(latestRealPointerEvent(event));
   if (!point) return;
   const targetIndex = overridePlayerIndex === 0 || overridePlayerIndex === 1 ? overridePlayerIndex : playerIndex;
   sendPointerFromPoint(point, force, targetIndex);
@@ -1818,30 +1823,49 @@ function sendPointerFromPoint(point, force, targetIndex) {
   if (!isActivePlay()) return;
   if ((!roomCode && !offlineGame) || playerIndex === null) return;
   const now = performance.now();
-  const inputIntervalMs = 1000 / serverTickHz;
-  const previousInputAt = lastInputAtByPlayer[targetIndex] || now - 1000 / 120;
-  if (!force && now - lastInputAtByPlayer[targetIndex] < inputIntervalMs) return;
-  lastInputAtByPlayer[targetIndex] = now;
   if (offlineGame) {
+    const inputIntervalMs = 1000 / OFFLINE_POINTER_INPUT_HZ;
+    const previousInputAt = lastInputAtByPlayer[targetIndex] || now - inputIntervalMs;
+    if (!force && now - lastInputAtByPlayer[targetIndex] < inputIntervalMs) return;
+    lastInputAtByPlayer[targetIndex] = now;
     updateOfflineMalletInput(targetIndex, point, previousInputAt, now);
     return;
   }
-  const inputSeq = nextInputSeq++;
+
+  const prepared = prepareRealtimePointer(point, targetIndex, now);
+  if (!prepared) return;
+  const inputIntervalMs = getRealtimeInputIntervalMs();
+  const lastInputAt = lastInputAtByPlayer[targetIndex] || 0;
+  if (!force && lastInputAt && now - lastInputAt < inputIntervalMs) {
+    storeRealtimeMalletEcho(targetIndex, prepared.constrained, now);
+    queueRealtimePointerInput(point, targetIndex, lastInputAt + inputIntervalMs - now);
+    return;
+  }
+  if (force) clearPendingRealtimeInput(targetIndex);
+
+  sendPreparedRealtimePointer(prepared, targetIndex, now);
+}
+
+function prepareRealtimePointer(point, targetIndex, now) {
   let constrained = constrainForPlayer(targetIndex, point.x, point.y);
   if (serverState?.phase !== "playing") {
     constrained = constrainMalletAwayFromPucks(targetIndex, constrained.x, constrained.y, serverState?.pucks || []);
   }
+  return { constrained, now };
+}
+
+function sendPreparedRealtimePointer(prepared, targetIndex, now) {
+  const previousInputAt = lastInputAtByPlayer[targetIndex] || now - 1000 / getRealtimeInputHz();
+  lastInputAtByPlayer[targetIndex] = now;
+  const inputSeq = nextInputSeq++;
+  const constrained = prepared.constrained;
   const inputSpeed = measureInputSpeed(
     targetIndex,
     constrained,
     now,
     clamp((now - previousInputAt) / 1000, 1 / 300, 1 / 24)
   );
-  outgoingMalletTargets.set(targetIndex, {
-    x: constrained.x,
-    y: constrained.y,
-    targetX: constrained.x,
-    targetY: constrained.y,
+  storeRealtimeMalletEcho(targetIndex, constrained, now, {
     inputSpeed,
     inputSeq,
     inputAt: now
@@ -1856,6 +1880,58 @@ function sendPointerFromPoint(point, force, targetIndex) {
       inputSpeed
     })
   );
+}
+
+function storeRealtimeMalletEcho(targetIndex, constrained, now, extra = {}) {
+  outgoingMalletTargets.set(targetIndex, {
+    x: constrained.x,
+    y: constrained.y,
+    targetX: constrained.x,
+    targetY: constrained.y,
+    updatedAt: now,
+    expiresAt: now + ONLINE_MALLET_ECHO_MS,
+    localEcho: true,
+    ...extra
+  });
+}
+
+function queueRealtimePointerInput(point, targetIndex, delayMs) {
+  const existing = pendingRealtimeInputs.get(targetIndex);
+  if (existing) {
+    existing.point = point;
+    return;
+  }
+  const timer = setTimeout(() => flushPendingRealtimeInput(targetIndex), Math.max(0, delayMs));
+  pendingRealtimeInputs.set(targetIndex, { point, timer });
+}
+
+function flushPendingRealtimeInput(targetIndex) {
+  const pending = pendingRealtimeInputs.get(targetIndex);
+  if (!pending) return;
+  pendingRealtimeInputs.delete(targetIndex);
+  sendPointerFromPoint(pending.point, false, targetIndex);
+}
+
+function clearPendingRealtimeInput(targetIndex) {
+  const pending = pendingRealtimeInputs.get(targetIndex);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  pendingRealtimeInputs.delete(targetIndex);
+}
+
+function clearPendingRealtimeInputs() {
+  for (const pending of pendingRealtimeInputs.values()) {
+    clearTimeout(pending.timer);
+  }
+  pendingRealtimeInputs.clear();
+}
+
+function getRealtimeInputHz() {
+  return clamp(Math.round(Number(serverTickHz) || 120), 60, REALTIME_INPUT_MAX_HZ);
+}
+
+function getRealtimeInputIntervalMs() {
+  return 1000 / getRealtimeInputHz();
 }
 
 function findEarliestSweepContact(startX, startY, deltaX, deltaY, radius, epsilon = 0) {
@@ -1884,6 +1960,11 @@ function findEarliestSweepContact(startX, startY, deltaX, deltaY, radius, epsilo
   const deltaLength = Math.sqrt(a);
   const rewind = Math.sqrt(Math.max(0, radiusWithEpsilon * radiusWithEpsilon - closestDistanceSq)) / deltaLength;
   return clamp(tClosest - rewind, 0, 1);
+}
+
+function latestRealPointerEvent(event) {
+  const samples = typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents() : null;
+  return samples?.length ? samples[samples.length - 1] : event;
 }
 
 function eventToTable(event) {
@@ -2186,6 +2267,7 @@ function clearControls() {
   pointerDown = false;
   suppressedGameplayPointers.clear();
   pendingPointerUiActions.clear();
+  clearPendingRealtimeInputs();
   activePointers.clear();
   lastInputPointByPlayer.fill(null);
   lastCenterTapAt = 0;
@@ -2286,7 +2368,7 @@ function isInputSeqAcknowledged(ackInputSeq, inputSeq) {
 
 function pruneAcknowledgedOutgoingTargets(ackInputSeq) {
   for (const [index, target] of outgoingMalletTargets) {
-    if (!target?.inputSeq || isInputSeqAcknowledged(ackInputSeq, target.inputSeq)) {
+    if (target?.inputSeq && isInputSeqAcknowledged(ackInputSeq, target.inputSeq)) {
       outgoingMalletTargets.delete(index);
     }
   }
@@ -3352,7 +3434,17 @@ function drawState(state) {
   ctx.restore();
 }
 
-function displayMallet(mallet) {
+function displayMallet(mallet, index) {
+  if (!offlineGame && isControlledMalletIndex(index)) {
+    const localTarget = outgoingMalletTargets.get(index);
+    if (localTarget?.localEcho) {
+      const now = performance.now();
+      if (!localTarget.expiresAt || now <= localTarget.expiresAt) {
+        return { ...mallet, x: localTarget.x, y: localTarget.y };
+      }
+      outgoingMalletTargets.delete(index);
+    }
+  }
   return mallet;
 }
 
