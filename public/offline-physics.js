@@ -38,6 +38,41 @@ export function applyPuckInertia(puck, config = {}, dt = 0) {
   puck.vy *= scale;
 }
 
+export function advanceDisplayPuck(table, config = {}, puck, dt = 0) {
+  const elapsed = Math.max(0, Number(dt) || 0);
+  const next = { ...puck };
+  if (elapsed <= 0) return next;
+
+  applyPuckInertia(next, config, elapsed);
+  next.x = (next.x || 0) + (next.vx || 0) * elapsed;
+  next.y = (next.y || 0) + (next.vy || 0) * elapsed;
+
+  const r = table.puckRadius || 0;
+  const minX = r;
+  const maxX = Math.max(minX, (table.width || 0) - r);
+  const restitution = clamp(
+    Number.isFinite(config.wallRestitution) ? config.wallRestitution : Number.isFinite(config.restitution) ? config.restitution : 1,
+    0,
+    1
+  );
+
+  for (let bounce = 0; bounce < 6 && (next.x < minX || next.x > maxX); bounce += 1) {
+    if (next.x < minX) {
+      next.x = minX + (minX - next.x);
+      next.vx = Math.abs(next.vx || 0) * restitution;
+    } else if (next.x > maxX) {
+      next.x = maxX - (next.x - maxX);
+      next.vx = -Math.abs(next.vx || 0) * restitution;
+    }
+  }
+
+  if (next.x < minX || next.x > maxX) {
+    next.x = clamp(next.x, minX, maxX);
+  }
+
+  return next;
+}
+
 export function limitPointStep(fromX, fromY, toX, toY, maxDistance) {
   const dx = toX - fromX;
   const dy = toY - fromY;

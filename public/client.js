@@ -1,5 +1,6 @@
 import { decodeRealtimePacket, encodeInputPacket } from "./protocol.js";
 import {
+  advanceDisplayPuck,
   applyPuckInertia,
   chooseSafeServePosition as chooseSafeServePositionCore,
   detectGoalCrossing,
@@ -309,6 +310,10 @@ const OFFLINE_MAX_FRAME_MS = 60;
 const OFFLINE_BOT_MIN_SPEED = 1700;
 const OFFLINE_BOT_MAX_SPEED = 3400;
 const puckCorrections = new Map();
+const lastDisplayedPucks = new Map();
+const PUCK_VISUAL_ADVANCE_MAX_MS = 70;
+const PUCK_VISUAL_CORRECTION_MS = 80;
+const PUCK_VISUAL_CORRECTION_MAX = 120;
 let nextInputSeq = 1;
 let lastAckInputSeq = 0;
 let lastLocalHitFxAt = 0;
@@ -1105,6 +1110,7 @@ function startOfflineGame(mode, count = puckCount) {
   stateSnapshots.length = 0;
   outgoingMalletTargets.clear();
   puckCorrections.clear();
+  lastDisplayedPucks.clear();
   lastPhase = "countdown";
   phaseChangedAt = performance.now();
   lastStateReceivedAt = performance.now();
@@ -1770,6 +1776,7 @@ function clearRoom() {
   outgoingMalletTargets.clear();
   lastInputPointByPlayer.fill(null);
   puckCorrections.clear();
+  lastDisplayedPucks.clear();
   remoteMalletSamples.forEach((samples) => samples.splice(0));
   nextInputSeq = 1;
   lastAckInputSeq = 0;
@@ -1786,8 +1793,44 @@ function clearRoom() {
   history.replaceState(null, "", location.pathname);
 }
 
-function applyPuckCorrection() {
-  puckCorrections.clear();
+function applyPuckCorrection(state) {
+  if (!state || state.phase !== "playing") {
+    puckCorrections.clear();
+    lastDisplayedPucks.clear();
+    return;
+  }
+
+  const now = performance.now();
+  const displayAdvanceSeconds = getPuckVisualAdvanceSeconds(now, now);
+  const nextKeys = new Set();
+  for (let index = 0; index < (state.pucks || []).length; index += 1) {
+    const puck = state.pucks[index];
+    const key = getPuckDisplayKey(puck, index);
+    nextKeys.add(key);
+    const previous = lastDisplayedPucks.get(key);
+    if (!previous) continue;
+
+    const baseline = advanceDisplayPuck(TABLE, offlinePhysicsConfig(), puck, displayAdvanceSeconds);
+    const dx = previous.x - baseline.x;
+    const dy = previous.y - baseline.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance <= 0.5) {
+      puckCorrections.delete(key);
+    } else if (distance <= PUCK_VISUAL_CORRECTION_MAX) {
+      puckCorrections.set(key, {
+        dx,
+        dy,
+        startedAt: now,
+        expiresAt: now + PUCK_VISUAL_CORRECTION_MS
+      });
+    } else {
+      puckCorrections.delete(key);
+    }
+  }
+
+  for (const key of puckCorrections.keys()) {
+    if (!nextKeys.has(key)) puckCorrections.delete(key);
+  }
 }
 
 function sendPointer(event, force, overridePlayerIndex = null) {
@@ -2236,6 +2279,7 @@ function offlinePhysicsConfig() {
     malletTransfer: 0.56,
     rehitSuppressionMs: LOCAL_REHIT_SUPPRESSION_MS,
     restitution: 0.72,
+    wallRestitution: LOCAL_WALL_RESTITUTION,
     stopSpeed: LOCAL_PUCK_STOP_SPEED
   };
 }
@@ -2342,17 +2386,61 @@ function cloneSnapshotState(state) {
   };
 }
 
-function renderState() {
+function renderState(frameTime = performance.now()) {
   if (!serverState) return null;
   if (offlineGame) return serverState;
-  if (serverState.phase !== "playing" || stateSnapshots.length < 2) return serverState;
+  if (serverState.phase !== "playing") return serverState;
 
   const newest = stateSnapshots[stateSnapshots.length - 1];
-  return newest.state;
+  if (!newest) return serverState;
+  return visualStateFromSnapshot(newest, frameTime);
 }
 
-function displayPuck(puck) {
+function visualStateFromSnapshot(snapshot, frameTime) {
+  const state = cloneSnapshotState(snapshot.state);
+  const advanceSeconds = getPuckVisualAdvanceSeconds(frameTime, snapshot.receivedAt);
+  state.pucks = state.pucks.map((puck, index) => {
+    const advanced = advanceDisplayPuck(TABLE, offlinePhysicsConfig(), puck, advanceSeconds);
+    return applyPuckVisualCorrection(advanced, getPuckDisplayKey(puck, index), frameTime);
+  });
+  return state;
+}
+
+function getPuckVisualAdvanceSeconds(now, receivedAt) {
+  const frameAgeMs = Math.max(0, now - receivedAt);
+  const rttLeadMs = Math.max(0, measuredRttMs * 0.5);
+  return Math.min(PUCK_VISUAL_ADVANCE_MAX_MS, frameAgeMs + rttLeadMs) / 1000;
+}
+
+function applyPuckVisualCorrection(puck, key, now) {
+  const correction = puckCorrections.get(key);
+  if (!correction) return puck;
+  if (now >= correction.expiresAt) {
+    puckCorrections.delete(key);
+    return puck;
+  }
+
+  const remaining = clamp((correction.expiresAt - now) / PUCK_VISUAL_CORRECTION_MS, 0, 1);
+  return {
+    ...puck,
+    x: puck.x + correction.dx * remaining,
+    y: puck.y + correction.dy * remaining
+  };
+}
+
+function displayPuck(puck, index) {
+  if (!offlineGame) {
+    lastDisplayedPucks.set(getPuckDisplayKey(puck, index), {
+      x: puck.x,
+      y: puck.y,
+      at: performance.now()
+    });
+  }
   return puck;
+}
+
+function getPuckDisplayKey(puck, index) {
+  return puck?.id || `p${index}`;
 }
 
 function isControlledMalletIndex(index) {
@@ -2403,7 +2491,7 @@ function render(frameTime = performance.now()) {
     renderBudgetMs %= targetFrameMs;
   }
   if (offlineGame) stepOfflineGame(frameTime);
-  const state = renderState() || demoState();
+  const state = renderState(frameTime) || demoState();
   const nextCursor = isActivePlay() ? "none" : "default";
   if (currentCursor !== nextCursor) {
     currentCursor = nextCursor;
@@ -3428,7 +3516,7 @@ function drawState(state) {
   }
 
   for (let index = 0; index < (state.pucks || []).length; index += 1) {
-    drawPuck(displayPuck(state.pucks[index], state), index);
+    drawPuck(displayPuck(state.pucks[index], index), index);
   }
 
   ctx.restore();

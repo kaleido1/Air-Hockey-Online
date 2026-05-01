@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  advanceDisplayPuck,
   applyPuckInertia,
   chooseSafeServePosition,
   detectGoalCrossing,
@@ -29,6 +30,7 @@ const CONFIG = {
   malletTransfer: 0.56,
   rehitSuppressionMs: 68,
   restitution: 0.72,
+  wallRestitution: 0.91,
   stopSpeed: 0
 };
 const PRE_OFFENSE_PUCK_MAX_SPEED = 2400;
@@ -240,6 +242,44 @@ function testMalletStepLimiterCapsInputJump() {
   assert.equal(limited.y, 0);
 }
 
+function testDisplayPuckAdvancesByVelocity() {
+  const puck = { id: "display-forward", x: 120, y: 300, vx: 1000, vy: -240 };
+
+  const result = advanceDisplayPuck(TABLE, { ...CONFIG, frictionPerSecond: 1, linearFriction: 0 }, puck, 0.05);
+
+  assert.equal(result.x, 170);
+  assert.equal(result.y, 288);
+  assert.equal(result.vx, 1000);
+  assert.equal(result.vy, -240);
+  assert.equal(puck.x, 120, "display advance should not mutate authoritative puck state");
+}
+
+function testDisplayPuckBouncesOffSideWall() {
+  const puck = {
+    id: "display-wall",
+    x: TABLE.width - TABLE.puckRadius - 4,
+    y: 420,
+    vx: 1200,
+    vy: 0
+  };
+
+  const result = advanceDisplayPuck(TABLE, { ...CONFIG, frictionPerSecond: 1, linearFriction: 0 }, puck, 0.02);
+
+  assert.ok(result.x <= TABLE.width - TABLE.puckRadius, "display puck should stay inside side wall");
+  assert.ok(result.vx < 0, "display puck should reflect from the right wall");
+  assert.ok(Math.abs(result.vx + 1200 * CONFIG.wallRestitution) < 0.001);
+}
+
+function testDisplayPuckAppliesFrictionWithoutHardStop() {
+  const puck = { id: "display-friction", x: 220, y: 380, vx: 800, vy: 0 };
+
+  const result = advanceDisplayPuck(TABLE, CONFIG, puck, 0.05);
+
+  assert.ok(result.vx < 800, "display advance should apply surface drag");
+  assert.ok(result.vx > 780, "display drag should be gentle over a short visual lead");
+  assert.ok(result.x > puck.x, "display puck should still advance after drag");
+}
+
 const tests = [
   testMalletStartsNearOwnGoals,
   testServeAvoidsMallets,
@@ -251,7 +291,10 @@ const tests = [
   testGoalScoredWhenPuckCrossesLineBetweenFrames,
   testPuckInertiaDampsWithoutSnappingFastPuck,
   testPuckInertiaKeepsSlowPuckMoving,
-  testMalletStepLimiterCapsInputJump
+  testMalletStepLimiterCapsInputJump,
+  testDisplayPuckAdvancesByVelocity,
+  testDisplayPuckBouncesOffSideWall,
+  testDisplayPuckAppliesFrictionWithoutHardStop
 ];
 
 process.env.AIR_HOCKEY_NO_LISTEN = "1";
