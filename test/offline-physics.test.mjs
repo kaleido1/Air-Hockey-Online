@@ -7,6 +7,7 @@ import {
   getMalletStart,
   getServeAnchorY,
   limitPointStep,
+  resolveDirectMalletSweep,
   resolveSweptPuckMalletContact,
   separatePuckFromMallet
 } from "../public/offline-physics.js";
@@ -144,6 +145,41 @@ function testStrongSweepUsesUncappedOffensiveSpeedBudget() {
   assert.ok(result, "strong sweep should hit the static puck");
   const speed = Math.hypot(result.vx, result.vy);
   assert.ok(speed > PRE_OFFENSE_PUCK_MAX_SPEED, "strong sweep should exceed the previous max-speed budget");
+}
+
+function testDirectSweepHelperMatchesOfflineStrikeFeel() {
+  const puck = {
+    id: "p0",
+    x: 295,
+    y: 512,
+    vx: 0,
+    vy: 0,
+    lastMalletHitIndex: null,
+    lastMalletHitAt: 0
+  };
+  const result = resolveDirectMalletSweep(
+    TABLE,
+    {
+      ...CONFIG,
+      directContactSlop: 0.04,
+      directStrikeBase: 170,
+      directStrikeScale: 0.105,
+      directSweepCarryScale: 8,
+      staticPuckSpeed: 70,
+      staticStrikeSpeed: 500,
+      staticSweepSpeed: 440,
+      strongSweepTangentialMax: 180,
+      strongSweepTangentialTransfer: 0.08
+    },
+    puck,
+    { fromX: 120, fromY: 512, toX: 470, toY: 512, inputDt: 1 / 120 },
+    0,
+    1000
+  );
+
+  assert.ok(result, "shared direct sweep should hit the puck");
+  assert.ok(Math.hypot(result.x - 470, result.y - 512) >= TABLE.malletRadius + TABLE.puckRadius);
+  assert.ok(Math.hypot(result.vx, result.vy) > PRE_OFFENSE_PUCK_MAX_SPEED);
 }
 
 function testFastPuckCannotTunnelThroughStationaryMallet() {
@@ -287,6 +323,7 @@ const tests = [
   testBottomMalletOverlapFallbackPushesPuckUp,
   testTopMalletOverlapFallbackPushesPuckDown,
   testStrongSweepUsesUncappedOffensiveSpeedBudget,
+  testDirectSweepHelperMatchesOfflineStrikeFeel,
   testFastPuckCannotTunnelThroughStationaryMallet,
   testGoalScoredWhenPuckCrossesLineBetweenFrames,
   testPuckInertiaDampsWithoutSnappingFastPuck,
@@ -327,7 +364,7 @@ function testServerDynamicMalletUsesAuthoritativeStrikeSpeed() {
   assert.ok(result.passed, JSON.stringify(result));
 }
 
-function testServerHumanInputSpeedBudgetIsBounded() {
+function testServerHumanInputSpeedBudgetIsUncapped() {
   const result = runInputSpeedBudgetSelfTest();
   assert.ok(result.passed, JSON.stringify(result));
 }
@@ -342,7 +379,7 @@ tests.push(
   testServerSlowPuckIsNotHardStopped,
   testServerUsesChosenTickRates,
   testServerDynamicMalletUsesAuthoritativeStrikeSpeed,
-  testServerHumanInputSpeedBudgetIsBounded,
+  testServerHumanInputSpeedBudgetIsUncapped,
   testServerAppliesInputImmediately
 );
 

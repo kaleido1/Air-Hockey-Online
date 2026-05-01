@@ -274,6 +274,109 @@ export function resolveSweptPuckMalletContact(table, config, puck, mallet, index
   };
 }
 
+export function resolveDirectMalletSweep(table, config, puck, sweep, index, now) {
+  const fromX = Number(sweep.fromX);
+  const fromY = Number(sweep.fromY);
+  const toX = Number(sweep.toX);
+  const toY = Number(sweep.toY);
+  const inputDt = Math.max(Number(sweep.inputDt) || 0, 1 / 240);
+  const sweepX = toX - fromX;
+  const sweepY = toY - fromY;
+  const distance = Math.hypot(sweepX, sweepY);
+  if (distance <= 0.001) return null;
+
+  const malletSpeed = distance / inputDt;
+  const minDistance = table.malletRadius + table.puckRadius;
+  const moveX = sweepX / distance;
+  const moveY = sweepY / distance;
+  const rehitMs = Number.isFinite(config.rehitSuppressionMs) ? config.rehitSuppressionMs : 0;
+  if (puck.lastMalletHitIndex === index && now - (puck.lastMalletHitAt || 0) < rehitMs) return null;
+
+  const relativeStartX = puck.x - fromX;
+  const relativeStartY = puck.y - fromY;
+  const relativeStartDistance = Math.hypot(relativeStartX, relativeStartY);
+  const movingTowardPuck = sweepX * relativeStartX + sweepY * relativeStartY > 0;
+  const contactSlop = Number.isFinite(config.directContactSlop)
+    ? config.directContactSlop
+    : Number.isFinite(config.contactSlop)
+      ? config.contactSlop
+      : 0.04;
+  let hitT = null;
+  if (relativeStartDistance <= minDistance + contactSlop && malletSpeed > 180) {
+    hitT = 0;
+  } else if (movingTowardPuck) {
+    hitT = findEarliestSweepContact(relativeStartX, relativeStartY, -sweepX, -sweepY, minDistance, contactSlop);
+  }
+  if (hitT === null) return null;
+
+  const contactMalletX = fromX + sweepX * hitT;
+  const contactMalletY = fromY + sweepY * hitT;
+  let normalX = puck.x - contactMalletX;
+  let normalY = puck.y - contactMalletY;
+  let normalLength = Math.hypot(normalX, normalY);
+  if (normalLength <= 0.001) {
+    normalX = sweepX || 1;
+    normalY = sweepY || 0;
+    normalLength = Math.hypot(normalX, normalY) || 1;
+  }
+  normalX /= normalLength;
+  normalY /= normalLength;
+
+  const staticPuckSpeed = Number.isFinite(config.staticPuckSpeed) ? config.staticPuckSpeed : 70;
+  const staticStrikeSpeed = Number.isFinite(config.staticStrikeSpeed) ? config.staticStrikeSpeed : 500;
+  const staticSweepSpeed = Number.isFinite(config.staticSweepSpeed) ? config.staticSweepSpeed : 440;
+  const puckSpeed = Math.hypot(puck.vx || 0, puck.vy || 0);
+  const staticKick = puckSpeed < staticPuckSpeed ? staticStrikeSpeed : 0;
+  const sweepKick = staticKick > 0 && malletSpeed > 260 ? staticSweepSpeed : 0;
+  let exitX = normalX;
+  let exitY = normalY;
+
+  if (sweepKick > 0) {
+    let blendedX = normalX * 0.55 + moveX * 0.82;
+    let blendedY = normalY * 0.55 + moveY * 0.82;
+    if (blendedX * normalX + blendedY * normalY < 0.25) {
+      blendedX += normalX * 0.75;
+      blendedY += normalY * 0.75;
+    }
+    const blendedLength = Math.hypot(blendedX, blendedY) || 1;
+    exitX = blendedX / blendedLength;
+    exitY = blendedY / blendedLength;
+  }
+
+  const directStrikeBase = Number.isFinite(config.directStrikeBase) ? config.directStrikeBase : 170;
+  const directStrikeScale = Number.isFinite(config.directStrikeScale) ? config.directStrikeScale : 0.105;
+  const sweepCarryScale = Number.isFinite(config.directSweepCarryScale) ? config.directSweepCarryScale : 8;
+  const strike = Math.max(staticKick, directStrikeBase + malletSpeed * directStrikeScale);
+  let vx = exitX * strike + moveX * sweepKick + sweepX * sweepCarryScale;
+  let vy = exitY * strike + moveY * sweepKick + sweepY * sweepCarryScale;
+
+  if (malletSpeed > 650) {
+    const tangentX = -normalY;
+    const tangentY = normalX;
+    const tangentSpeed = (moveX * tangentX + moveY * tangentY) * malletSpeed;
+    const tangentCarry = clamp(
+      tangentSpeed * (config.strongSweepTangentialTransfer || 0),
+      -(config.strongSweepTangentialMax || 0),
+      config.strongSweepTangentialMax || 0
+    );
+    vx += tangentX * tangentCarry;
+    vy += tangentY * tangentCarry;
+  }
+
+  return {
+    x: contactMalletX + exitX * (minDistance + config.hardContactSeparation),
+    y: contactMalletY + exitY * (minDistance + config.hardContactSeparation),
+    vx,
+    vy,
+    hitT,
+    nx: normalX,
+    ny: normalY,
+    exitX,
+    exitY,
+    strike
+  };
+}
+
 function crossedGoalLine(prevX, prevY, x, y, lineY, goalLeft, goalRight, direction) {
   const movedTowardGoal = direction < 0 ? y <= lineY && prevY >= lineY : y >= lineY && prevY <= lineY;
   if (!movedTowardGoal) return false;

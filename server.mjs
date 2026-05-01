@@ -16,6 +16,7 @@ import {
   applyPuckInertia,
   detectGoalCrossing,
   limitPointStep,
+  resolveDirectMalletSweep,
   separatePuckFromMallet
 } from "./public/offline-physics.js";
 
@@ -42,7 +43,6 @@ const SNAPSHOT_HZ = readTickHz("AIR_HOCKEY_SNAPSHOT_HZ", 120, 60, Math.min(240, 
 const DT = 1 / PHYSICS_HZ;
 const HUMAN_MALLET_BASE_SPEED = 4200;
 const HUMAN_MALLET_INPUT_SPEED_SCALE = 1.15;
-const HUMAN_MALLET_MAX_SPEED = 9000;
 const HUMAN_MALLET_SPEED_HOLD_MS = 120;
 const BOT_MIN_SPEED = 1700;
 const BOT_MAX_SPEED = 3400;
@@ -1251,8 +1251,7 @@ function updateInput(client, message) {
 function normalizedHumanInputSpeed(message, fromX, fromY, targetX, targetY, dt) {
   const measuredSpeed = Math.hypot(targetX - fromX, targetY - fromY) / Math.max(dt, 1 / 300);
   const clientSpeed = Math.max(0, Number(message.inputSpeed) || 0);
-  const requested = Math.max(HUMAN_MALLET_BASE_SPEED, measuredSpeed, clientSpeed * HUMAN_MALLET_INPUT_SPEED_SCALE);
-  return clamp(requested, HUMAN_MALLET_BASE_SPEED, HUMAN_MALLET_MAX_SPEED);
+  return Math.max(HUMAN_MALLET_BASE_SPEED, measuredSpeed, clientSpeed * HUMAN_MALLET_INPUT_SPEED_SCALE);
 }
 
 function limitVectorMagnitude(x, y, maxMagnitude) {
@@ -1264,7 +1263,7 @@ function limitVectorMagnitude(x, y, maxMagnitude) {
 
 function activeHumanMalletSpeedLimit(mallet, now = Date.now()) {
   if (mallet?.inputSpeedUntil && now <= mallet.inputSpeedUntil) {
-    return clamp(Number(mallet.inputSpeedLimit) || HUMAN_MALLET_BASE_SPEED, HUMAN_MALLET_BASE_SPEED, HUMAN_MALLET_MAX_SPEED);
+    return Math.max(HUMAN_MALLET_BASE_SPEED, Number(mallet.inputSpeedLimit) || HUMAN_MALLET_BASE_SPEED);
   }
   return HUMAN_MALLET_BASE_SPEED;
 }
@@ -1531,7 +1530,34 @@ function moveMallets(room, dt) {
 function resolveInputHits(room, mallet, malletIndex, dt, emitState = true) {
   let anyHit = false;
   for (const puck of room.state.pucks) {
-    const hit = collidePuckWithMallet(room, puck, mallet, malletIndex, dt);
+    const result = resolveDirectMalletSweep(
+      TABLE,
+      directSweepConfig(),
+      puck,
+      {
+        fromX: mallet.sweepFromX,
+        fromY: mallet.sweepFromY,
+        toX: mallet.x,
+        toY: mallet.y,
+        inputDt: dt
+      },
+      malletIndex,
+      Date.now()
+    );
+    let hit = 0;
+    if (result) {
+      puck.x = result.x;
+      puck.y = result.y;
+      puck.vx = result.vx;
+      puck.vy = result.vy;
+      puck.lastMalletHitIndex = malletIndex;
+      puck.lastMalletHitAt = Date.now();
+      puck.hitSerial = ((puck.hitSerial || 0) + 1) & 0xff;
+      rememberMalletRelease(puck, malletIndex, result.exitX, result.exitY, Date.now());
+      hit = clamp(result.strike / 3500, 0.14, 0.86);
+    } else {
+      hit = collidePuckWithMallet(room, puck, mallet, malletIndex, dt);
+    }
     if (!hit) continue;
     anyHit = true;
     forceSeparatePuckFromAllMallets(room, puck);
@@ -1542,6 +1568,26 @@ function resolveInputHits(room, mallet, malletIndex, dt, emitState = true) {
   }
   if (anyHit && emitState) sendImmediateHitState(room, Date.now());
   return anyHit;
+}
+
+function directSweepConfig() {
+  return {
+    blockReleaseSpeed: EDGE_BLOCK_RESPONSE_SPEED,
+    contactSeparation: CONTACT_SEPARATION,
+    contactSlop: CONTACT_SLOP,
+    directContactSlop: 0.04,
+    directStrikeBase: 170,
+    directStrikeScale: 0.105,
+    directSweepCarryScale: 8,
+    hardContactSeparation: HARD_CONTACT_SEPARATION,
+    rehitSuppressionMs: MALLET_HIT_COOLDOWN_MS,
+    restitution: MALLET_RESTITUTION,
+    staticPuckSpeed: STATIC_PUCK_SPEED,
+    staticStrikeSpeed: STATIC_STRIKE_MIN_SPEED,
+    staticSweepSpeed: STATIC_SWEEP_MIN_SPEED,
+    strongSweepTangentialMax: STRONG_SWEEP_TANGENTIAL_MAX,
+    strongSweepTangentialTransfer: STRONG_SWEEP_TANGENTIAL_TRANSFER
+  };
 }
 
 function settlePuckMalletOverlaps(room) {
@@ -3441,15 +3487,12 @@ export function runInputSpeedBudgetSelfTest() {
     strikeSpeed,
     legacyStrikeSpeed,
     baseMovePerTick: HUMAN_MALLET_BASE_SPEED / PHYSICS_HZ,
-    maxMovePerTick: HUMAN_MALLET_MAX_SPEED / PHYSICS_HZ,
     passed:
       requestedSpeed > HUMAN_MALLET_BASE_SPEED &&
-      requestedSpeed <= HUMAN_MALLET_MAX_SPEED &&
+      requestedSpeed > 9000 &&
       Math.abs(immediateMove - 260) < 0.1 &&
-      strikeSpeed <= HUMAN_MALLET_MAX_SPEED + 0.1 &&
-      strikeSpeed >= HUMAN_MALLET_MAX_SPEED - 0.1 &&
+      Math.abs(strikeSpeed - requestedSpeed) < 0.1 &&
       legacyRequestedSpeed >= HUMAN_MALLET_BASE_SPEED &&
-      legacyRequestedSpeed <= HUMAN_MALLET_MAX_SPEED &&
       legacyStrikeSpeed <= legacyRequestedSpeed + 0.1
   };
 }
