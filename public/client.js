@@ -1,4 +1,4 @@
-import { decodeRealtimePacket, encodeInputPacket } from "./protocol.js";
+import { decodeRealtimePacket, encodeFxPacket, encodeInputPacket, encodeStatePacket } from "./protocol.js";
 import {
   applyPuckInertia,
   chooseSafeServePosition as chooseSafeServePositionCore,
@@ -306,6 +306,10 @@ const OFFLINE_BOT_MIN_SPEED = 1700;
 const OFFLINE_BOT_MAX_SPEED = 3400;
 let nextInputSeq = 1;
 let lastLocalHitFxAt = 0;
+let webrtc = null;
+let lastWebRtcSnapshotAt = 0;
+let lastWebRtcRemoteInputAt = 0;
+let lastWebRtcRemoteInputSeq = 0;
 
 applyLanguage();
 startRefreshRateSampling();
@@ -587,9 +591,10 @@ window.addEventListener("keydown", (event) => {
     unlockAudio();
     if (offlineGame) {
       toggleOfflinePause();
+      if (webrtc?.isHost) sendWebRtcControl({ type: "paused" });
       return;
     }
-    send({ type: "pause" });
+    if (!sendWebRtcControl({ type: "pause" })) send({ type: "pause" });
     return;
   }
 
@@ -674,11 +679,13 @@ function handleMessage(message) {
       roomPlayers = message.players || roomPlayers;
       updateRoomLabels(message);
       if (message.players?.[1]?.bot) setStatus("practice");
+      maybeStartWebRtcSession();
       break;
     case "started":
       roomMinimized = false;
       showUi(null);
       setStatus("getReady");
+      maybeStartWebRtcSession(true);
       break;
     case "score":
       playFx("score", 1);
@@ -705,6 +712,18 @@ function handleMessage(message) {
         measuredRttMs = measuredRttMs * 0.8 + rtt * 0.2;
         els.pingStatus.textContent = `${rtt} ms`;
       }
+      break;
+    case "webrtc-offer":
+      void acceptWebRtcOffer(message.description);
+      break;
+    case "webrtc-answer":
+      void acceptWebRtcAnswer(message.description);
+      break;
+    case "webrtc-ice":
+      void acceptWebRtcIce(message.candidate);
+      break;
+    case "webrtc-failed":
+      els.connectionStatus.textContent = t("error");
       break;
     default:
       break;
@@ -798,6 +817,280 @@ function reportRefreshRate() {
   if (!connected || hasReportedRefreshHz) return;
   hasReportedRefreshHz = true;
   send({ type: "display", refreshHz: displayRefreshHz });
+}
+
+function maybeStartWebRtcSession(forceOffer = false) {
+  if (!roomSettings?.webrtc || !roomCode || playerIndex === null || !roomPlayers?.[0]?.connected || !roomPlayers?.[1]?.connected) {
+    return;
+  }
+  if (webrtc?.roomCode === roomCode && webrtc.peer) {
+    if (forceOffer && playerIndex === 0 && !webrtc.offered) void createWebRtcOffer();
+    return;
+  }
+  closeWebRtcSession();
+  webrtc = {
+    roomCode,
+    isHost: playerIndex === 0,
+    peer: null,
+    channel: null,
+    offered: false,
+    connected: false,
+    pendingCandidates: []
+  };
+  if (webrtc.isHost) void createWebRtcOffer();
+}
+
+async function createWebRtcPeer() {
+  const session = webrtc;
+  if (!session) return null;
+  const iceServers = await fetchIceServers();
+  if (session !== webrtc) return null;
+  const peer = new RTCPeerConnection({ iceServers });
+  session.peer = peer;
+
+  peer.addEventListener("icecandidate", (event) => {
+    if (event.candidate) send({ type: "webrtc-ice", candidate: event.candidate.toJSON() });
+  });
+  peer.addEventListener("connectionstatechange", () => {
+    const state = peer.connectionState;
+    if (state === "connected") {
+      session.connected = true;
+      els.connectionStatus.textContent = t("online");
+      if (session.isHost && !offlineGame) startWebRtcHostGame();
+    } else if (state === "failed" || state === "closed" || state === "disconnected") {
+      session.connected = false;
+      if (!offlineGame) els.connectionStatus.textContent = state === "failed" ? t("error") : t("reconnecting");
+    }
+  });
+  peer.addEventListener("datachannel", (event) => attachWebRtcChannel(event.channel));
+
+  return peer;
+}
+
+async function fetchIceServers() {
+  try {
+    const response = await fetch("/turn-credentials", { cache: "no-store" });
+    if (!response.ok) return [];
+    const config = await response.json();
+    return Array.isArray(config.iceServers) ? config.iceServers : [];
+  } catch {
+    return [];
+  }
+}
+
+async function createWebRtcOffer() {
+  if (!webrtc || !roomSettings?.webrtc || playerIndex !== 0 || typeof RTCPeerConnection !== "function") return;
+  const peer = webrtc.peer || (await createWebRtcPeer());
+  if (!peer || webrtc.offered) return;
+  attachWebRtcChannel(peer.createDataChannel("air-hockey", { ordered: false, maxRetransmits: 0 }));
+  const offer = await peer.createOffer();
+  await peer.setLocalDescription(offer);
+  webrtc.offered = true;
+  send({ type: "webrtc-offer", description: peer.localDescription?.toJSON?.() || peer.localDescription });
+}
+
+async function acceptWebRtcOffer(description) {
+  if (!roomSettings?.webrtc || playerIndex !== 1 || !description || typeof RTCPeerConnection !== "function") return;
+  maybeStartWebRtcSession();
+  const peer = webrtc?.peer || (await createWebRtcPeer());
+  if (!peer) return;
+  await peer.setRemoteDescription(description);
+  await flushWebRtcIce();
+  const answer = await peer.createAnswer();
+  await peer.setLocalDescription(answer);
+  send({ type: "webrtc-answer", description: peer.localDescription?.toJSON?.() || peer.localDescription });
+}
+
+async function acceptWebRtcAnswer(description) {
+  if (!webrtc?.peer || !description) return;
+  await webrtc.peer.setRemoteDescription(description);
+  await flushWebRtcIce();
+}
+
+async function acceptWebRtcIce(candidate) {
+  if (!candidate) return;
+  if (!webrtc?.peer || !webrtc.peer.remoteDescription) {
+    if (webrtc) webrtc.pendingCandidates.push(candidate);
+    return;
+  }
+  try {
+    await webrtc.peer.addIceCandidate(candidate);
+  } catch {
+    // Ignore stale candidates from a superseded peer connection.
+  }
+}
+
+async function flushWebRtcIce() {
+  if (!webrtc?.peer || !webrtc.peer.remoteDescription) return;
+  const pending = webrtc.pendingCandidates.splice(0);
+  for (const candidate of pending) {
+    await acceptWebRtcIce(candidate);
+  }
+}
+
+function attachWebRtcChannel(channel) {
+  if (!webrtc || !channel) return;
+  webrtc.channel = channel;
+  channel.binaryType = "arraybuffer";
+  channel.addEventListener("open", () => {
+    if (!webrtc) return;
+    webrtc.connected = true;
+    els.connectionStatus.textContent = t("online");
+    send({ type: "webrtc-ready" });
+    if (webrtc.isHost) startWebRtcHostGame();
+  });
+  channel.addEventListener("message", (event) => handleWebRtcData(event.data));
+  channel.addEventListener("close", () => {
+    if (webrtc) webrtc.connected = false;
+  });
+}
+
+function closeWebRtcSession() {
+  if (!webrtc) return;
+  try {
+    webrtc.channel?.close();
+  } catch {
+    // Ignore close races.
+  }
+  try {
+    webrtc.peer?.close();
+  } catch {
+    // Ignore close races.
+  }
+  webrtc = null;
+  lastWebRtcSnapshotAt = 0;
+  lastWebRtcRemoteInputAt = 0;
+  lastWebRtcRemoteInputSeq = 0;
+}
+
+function handleWebRtcData(data) {
+  if (typeof data === "string") {
+    handleWebRtcControl(data);
+    return;
+  }
+  const message = decodeRealtimePacket(data, Date.now());
+  if (!message) return;
+  if (webrtc?.isHost && message.type === "input") {
+    applyWebRtcRemoteInput(message);
+    return;
+  }
+  if (!webrtc?.isHost && message.type === "state") {
+    applyRealtimeState(message);
+    return;
+  }
+  if (!webrtc?.isHost && message.type === "fx") {
+    playFx(message.kind, message.intensity, false);
+  }
+}
+
+function handleWebRtcControl(raw) {
+  let message = null;
+  try {
+    message = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (!message || typeof message.type !== "string") return;
+  if (webrtc?.isHost && message.type === "pause") {
+    toggleOfflinePause();
+    sendWebRtcControl({ type: "paused" });
+  } else if (webrtc?.isHost && message.type === "restart") {
+    startWebRtcHostGame();
+    sendWebRtcControl({ type: "restart" });
+  } else if (message.type === "restart") {
+    setStatus("getReady");
+  } else if (message.type === "paused") {
+    setStatus("");
+  } else if (message.type === "leave") {
+    clearRoom();
+  }
+}
+
+function applyWebRtcRemoteInput(message) {
+  if (!offlineGame?.state) return;
+  const targetIndex = message.playerIndex === 0 || message.playerIndex === 1 ? message.playerIndex : 1;
+  if (targetIndex !== 1) return;
+  const now = performance.now();
+  const previousInputAt = lastWebRtcRemoteInputAt || now - 1000 / OFFLINE_POINTER_INPUT_HZ;
+  lastWebRtcRemoteInputAt = now;
+  lastWebRtcRemoteInputSeq = Number(message.inputSeq) || lastWebRtcRemoteInputSeq;
+  updateOfflineMalletInput(targetIndex, { x: message.x, y: message.y }, previousInputAt, now);
+}
+
+function startWebRtcHostGame() {
+  if (!roomSettings?.webrtc || playerIndex !== 0) return;
+  const code = roomCode;
+  const settings = roomSettings;
+  const players = roomPlayers;
+  startOfflineGame("webrtc-host", settings.puckCount);
+  roomCode = code;
+  roomSettings = settings;
+  roomPlayers = players;
+  if (offlineGame) offlineGame.mode = "webrtc-host";
+  updateRoomLabels({ code: roomCode, players: roomPlayers, settings: roomSettings });
+  updateScoreboard({ players: roomPlayers });
+  setStatus("getReady");
+}
+
+function sendWebRtcControl(message) {
+  const channel = webrtc?.channel;
+  if (!channel || channel.readyState !== "open") return false;
+  channel.send(JSON.stringify(message));
+  return true;
+}
+
+function sendWebRtcRealtime(payload) {
+  const channel = webrtc?.channel;
+  if (!channel || channel.readyState !== "open") return false;
+  channel.send(payload);
+  return true;
+}
+
+function sendWebRtcHostSnapshot(force = false) {
+  if (!webrtc?.isHost || !offlineGame?.state) return;
+  const now = performance.now();
+  const interval = 1000 / Math.max(60, displayRefreshHz);
+  if (!force && now - lastWebRtcSnapshotAt < interval - 1) return;
+  lastWebRtcSnapshotAt = now;
+  const state = publicWebRtcState(offlineGame.state, now);
+  sendWebRtcRealtime(
+    encodeStatePacket(state, {
+      serverTick: Math.round(now) & 0xffff,
+      ackInputSeq: lastWebRtcRemoteInputSeq,
+      phaseEndsInMs: state.phaseEndsInMs
+    })
+  );
+}
+
+function sendWebRtcFx(kind, intensity = 0.5) {
+  if (!webrtc?.isHost) return;
+  sendWebRtcRealtime(encodeFxPacket(kind, intensity));
+}
+
+function publicWebRtcState(state, now = performance.now()) {
+  return {
+    phase: state.phase,
+    phaseEndsAt: state.phaseEndsAt,
+    phaseEndsInMs: state.phaseEndsAt ? Math.max(0, state.phaseEndsAt - now) : 0,
+    scores: state.scores,
+    lastScorer: state.lastScorer,
+    winner: state.winner ?? null,
+    mallets: state.mallets.map((mallet) => ({
+      x: Math.round(mallet.x),
+      y: Math.round(mallet.y),
+      vx: Math.round(mallet.vx),
+      vy: Math.round(mallet.vy)
+    })),
+    pucks: state.pucks.map((puck) => ({
+      id: puck.id,
+      x: Math.round(puck.x),
+      y: Math.round(puck.y),
+      vx: Math.round(puck.vx),
+      vy: Math.round(puck.vy),
+      lastMalletHitIndex: puck.lastMalletHitIndex,
+      hitSerial: puck.hitSerial || 0
+    }))
+  };
 }
 
 function getRefreshHzCap() {
@@ -1094,15 +1387,23 @@ function restartOfflineGame() {
 }
 
 function restartCurrentGame() {
+  if (webrtc?.isHost && roomSettings?.webrtc) {
+    startWebRtcHostGame();
+    sendWebRtcControl({ type: "restart" });
+    return;
+  }
   if (offlineGame) {
     restartOfflineGame();
     return;
   }
-  send({ type: "restart" });
+  if (!sendWebRtcControl({ type: "restart" })) send({ type: "restart" });
 }
 
 function leaveCurrentGame() {
-  if (!offlineGame) send({ type: "leave" });
+  sendWebRtcControl({ type: "leave" });
+  if (roomSettings?.webrtc) send({ type: "leave" });
+  closeWebRtcSession();
+  if (!offlineGame && !roomSettings?.webrtc) send({ type: "leave" });
   clearRoom();
 }
 
@@ -1288,6 +1589,7 @@ function stepOfflineGame(frameTime) {
   serverState = state;
   lastStateReceivedAt = now;
   updateScoreboard({ players: roomPlayers });
+  sendWebRtcHostSnapshot();
 }
 
 function moveOfflineControlledMallets(dt, now) {
@@ -1624,6 +1926,7 @@ function predictOfflinePuckXAtY(puck, targetY) {
 }
 
 function clearRoom() {
+  closeWebRtcSession();
   stopOfflineGame();
   if (gameoverReturnTimer) {
     clearTimeout(gameoverReturnTimer);
@@ -1838,6 +2141,7 @@ function send(message) {
 }
 
 function sendRealtime(payload) {
+  if (roomSettings?.webrtc && sendWebRtcRealtime(payload)) return;
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
   socket.send(payload);
 }
@@ -3607,12 +3911,13 @@ function unlockAudio(fromGesture = true) {
   return audioUnlockPromise;
 }
 
-function playFx(kind, intensity = 0.5) {
+function playFx(kind, intensity = 0.5, broadcast = true) {
+  if (broadcast) sendWebRtcFx(kind, intensity);
   if (!soundEnabled) return;
   const unlock = unlockAudio(false);
   if (!audio || audio.state !== "running") {
     void unlock.then((ready) => {
-      if (ready && audio?.state === "running") playFx(kind, intensity);
+      if (ready && audio?.state === "running") playFx(kind, intensity, false);
     });
     return;
   }

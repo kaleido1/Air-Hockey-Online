@@ -85,10 +85,17 @@ const PUCK_INERTIA = {
 const STUCK_SPEED = 95;
 const STUCK_SECONDS = 0.38;
 const RECONNECT_GRACE_MS = 180_000;
+const TURN_CACHE_TTL_MS = 60_000;
 
 const rooms = new Map();
 const clients = new Map();
 const quickQueue = [];
+let turnCredentialCache = {
+  checkedAt: 0,
+  ok: false,
+  iceServers: [],
+  error: ""
+};
 
 const mimeTypes = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -115,7 +122,7 @@ const server = http.createServer((req, res) => {
     res.end(
       [
         `window.AIR_HOCKEY_SERVER_URL = ${JSON.stringify(String(process.env.AIR_HOCKEY_SERVER_URL || "").trim())};`,
-        "window.AIR_HOCKEY_REALTIME_MODE = 'server-authoritative-websocket';",
+        "window.AIR_HOCKEY_REALTIME_MODE = 'webrtc-datachannel';",
         `window.AIR_HOCKEY_PHYSICS_HZ = ${PHYSICS_HZ};`,
         `window.AIR_HOCKEY_SNAPSHOT_HZ = ${SNAPSHOT_HZ};`
       ].join("\n")
@@ -124,11 +131,63 @@ const server = http.createServer((req, res) => {
   }
 
   if (pathname === "/healthz") {
-    res.writeHead(200, {
-      "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "no-store"
-    });
-    res.end(JSON.stringify({ ok: true, mode: "server-authoritative-websocket" }));
+    getTurnCredentialStatus()
+      .then((turn) => {
+        res.writeHead(200, {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            mode: "webrtc-signaling",
+            turnConfigured: turn.configured,
+            turnFetchOk: turn.ok,
+            iceServerCount: turn.iceServerCount
+          })
+        );
+      })
+      .catch(() => {
+        res.writeHead(200, {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            mode: "webrtc-signaling",
+            turnConfigured: Boolean(String(process.env.AIR_HOCKEY_TURN_CREDENTIALS_URL || "").trim()),
+            turnFetchOk: false,
+            iceServerCount: 0
+          })
+        );
+      });
+    return;
+  }
+
+  if (pathname === "/turn-credentials") {
+    getTurnCredentialStatus()
+      .then((turn) => {
+        res.writeHead(turn.configured && !turn.ok ? 503 : 200, {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        });
+        res.end(
+          JSON.stringify({
+            configured: turn.configured,
+            ok: turn.ok,
+            iceServers: turn.iceServers,
+            iceServerCount: turn.iceServerCount
+          })
+        );
+      })
+      .catch(() => {
+        res.writeHead(503, {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        });
+        res.end(JSON.stringify({ configured: true, ok: false, iceServers: [], iceServerCount: 0 }));
+      });
     return;
   }
 
@@ -378,9 +437,128 @@ function handleMessage(client, message) {
     case "display":
       updateClientDisplay(client, message);
       break;
+    case "webrtc-offer":
+    case "webrtc-answer":
+    case "webrtc-ice":
+    case "webrtc-ready":
+    case "webrtc-failed":
+      relayWebRtcSignal(client, message);
+      break;
     default:
       send(client, { type: "error", message: "Unknown message" });
   }
+}
+
+async function getTurnCredentialStatus() {
+  const configuredUrl = String(process.env.AIR_HOCKEY_TURN_CREDENTIALS_URL || "").trim();
+  if (!configuredUrl) {
+    turnCredentialCache = {
+      checkedAt: Date.now(),
+      ok: false,
+      iceServers: [],
+      error: ""
+    };
+    return {
+      configured: false,
+      ok: false,
+      iceServers: [],
+      iceServerCount: 0
+    };
+  }
+
+  const now = Date.now();
+  if (turnCredentialCache.checkedAt && now - turnCredentialCache.checkedAt < TURN_CACHE_TTL_MS) {
+    return {
+      configured: true,
+      ok: turnCredentialCache.ok,
+      iceServers: turnCredentialCache.iceServers,
+      iceServerCount: turnCredentialCache.iceServers.length
+    };
+  }
+
+  try {
+    const response = await fetch(configuredUrl, {
+      headers: { Accept: "application/json" }
+    });
+    if (!response.ok) throw new Error(`TURN credential fetch returned ${response.status}`);
+    const payload = await response.json();
+    const iceServers = normalizeIceServers(payload);
+    turnCredentialCache = {
+      checkedAt: now,
+      ok: iceServers.length > 0,
+      iceServers,
+      error: iceServers.length > 0 ? "" : "No usable ICE servers returned"
+    };
+  } catch (error) {
+    turnCredentialCache = {
+      checkedAt: now,
+      ok: false,
+      iceServers: [],
+      error: error?.message || "TURN credential fetch failed"
+    };
+  }
+
+  return {
+    configured: true,
+    ok: turnCredentialCache.ok,
+    iceServers: turnCredentialCache.iceServers,
+    iceServerCount: turnCredentialCache.iceServers.length
+  };
+}
+
+function normalizeIceServers(payload) {
+  const candidate =
+    Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.iceServers)
+        ? payload.iceServers
+        : Array.isArray(payload?.servers)
+          ? payload.servers
+          : payload?.urls
+            ? [payload]
+            : [];
+
+  const normalized = [];
+  for (const entry of candidate) {
+    const urls = normalizeIceUrls(entry?.urls || entry?.url);
+    if (urls.length === 0) continue;
+    const server = { urls };
+    if (typeof entry.username === "string") server.username = entry.username;
+    if (typeof entry.credential === "string") server.credential = entry.credential;
+    if (typeof entry.credentialType === "string") server.credentialType = entry.credentialType;
+    normalized.push(server);
+  }
+  return normalized;
+}
+
+function normalizeIceUrls(value) {
+  const urls = Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+  return urls.filter((url) => /^(stun|turn|turns):/i.test(String(url || "").trim()));
+}
+
+function relayWebRtcSignal(client, message) {
+  const room = currentRoom(client);
+  if (!room || !room.settings.webrtc || client.playerIndex === null) return;
+  const opponentIndex = client.playerIndex === 0 ? 1 : 0;
+  const opponent = room.players[opponentIndex];
+  if (!opponent || opponent.bot) return;
+  const target = clients.get(opponent.id);
+  if (!target) return;
+
+  const relayed = {
+    type: message.type,
+    from: client.playerIndex
+  };
+  if (message.description && typeof message.description === "object") {
+    relayed.description = message.description;
+  }
+  if (message.candidate && typeof message.candidate === "object") {
+    relayed.candidate = message.candidate;
+  }
+  if (typeof message.reason === "string") {
+    relayed.reason = message.reason.slice(0, 160);
+  }
+  send(target, relayed);
 }
 
 function updateClientDisplay(client, message) {
@@ -613,7 +791,8 @@ function makeRoom(options = {}) {
       quick: Boolean(options.quick),
       lan: Boolean(options.lan),
       local: Boolean(options.local),
-      bot: Boolean(options.bot)
+      bot: Boolean(options.bot),
+      webrtc: options.webrtc !== false && !options.local && !options.bot
     },
     state: initialState(normalizePuckCount(options.puckCount)),
     serverTick: 0,
@@ -1424,6 +1603,7 @@ function tickRooms() {
       room.updatedAt = now;
     }
 
+    if (room.settings.webrtc) continue;
     if (room.state.phase === "waiting") continue;
     if (room.state.phase === "paused") continue;
 
@@ -2557,6 +2737,7 @@ function sendSnapshots() {
 }
 
 function sendRoomState(room, now = Date.now(), force = false) {
+  if (room.settings.webrtc) return;
   if (room.state.phase === "playing") settlePuckMalletOverlaps(room);
   const state = publicState(room.state);
   const sent = new Set();
@@ -2639,6 +2820,7 @@ function pruneExpiredDisconnectedPlayers(room, now = Date.now()) {
 }
 
 function emitFx(room, kind, force = false, intensity = 0.5) {
+  if (room.settings.webrtc) return;
   const now = Date.now();
   const key = kind;
   const lastAt = room.lastFxAt.get(key) || 0;
@@ -3107,7 +3289,7 @@ function stepMatterSelfTestRoom(room, frames = 1) {
 export function runDirectInputNoSwallowSelfTest() {
   const now = Date.now();
   const initialPuckX = TABLE.width / 2;
-  const room = makeRoom({ puckCount: 1, lan: true });
+  const room = makeRoom({ puckCount: 1, lan: true, webrtc: false });
   room.players = [null, null];
   room.state.phase = "playing";
   room.state.pucks = [
@@ -3185,7 +3367,7 @@ export function runDirectInputNoSwallowSelfTest() {
 
 export function runDynamicMalletMatterSelfTest() {
   const cases = [0, 1].map((malletIndex) => {
-    const room = makeRoom({ puckCount: 1, lan: true });
+    const room = makeRoom({ puckCount: 1, lan: true, webrtc: false });
     room.players = [null, null];
     room.state.phase = "playing";
     const direction = malletIndex === 0 ? 1 : -1;
@@ -3280,7 +3462,7 @@ export function runDynamicMalletMatterSelfTest() {
 }
 
 export function runMatterMalletSweepGuardSelfTest() {
-  const room = makeRoom({ puckCount: 1, lan: true });
+  const room = makeRoom({ puckCount: 1, lan: true, webrtc: false });
   room.players = [null, null];
   room.state.phase = "playing";
   const puck = {
@@ -3320,7 +3502,7 @@ export function runMatterMalletSweepGuardSelfTest() {
 }
 
 export function runServerMatterWorldSelfTest() {
-  const room = makeRoom({ puckCount: 2, lan: true });
+  const room = makeRoom({ puckCount: 2, lan: true, webrtc: false });
   room.players = [null, null];
   room.state.phase = "playing";
   room.state.pucks = [
@@ -3421,9 +3603,89 @@ export function runInputProtocolSelfTest() {
   };
 }
 
+export function runTurnCredentialNormalizationSelfTest() {
+  const cases = [
+    normalizeIceServers({
+      iceServers: [
+        {
+          urls: ["turn:relay.example.com:3478", "stun:relay.example.com:3478"],
+          username: "user",
+          credential: "secret"
+        }
+      ]
+    }),
+    normalizeIceServers([
+      {
+        urls: "turns:relay.example.com:5349",
+        username: "user",
+        credential: "secret"
+      }
+    ]),
+    normalizeIceServers({
+      urls: "turn:relay.example.com:3478?transport=udp",
+      username: "user",
+      credential: "secret"
+    })
+  ];
+  const ignored = normalizeIceServers({ iceServers: [{ urls: "https://example.com/not-ice" }] });
+  return {
+    counts: cases.map((entry) => entry.length),
+    ignoredCount: ignored.length,
+    passed:
+      cases.every((entry) => entry.length === 1 && entry[0].urls.length >= 1 && !String(entry[0].urls[0]).includes("secret")) &&
+      ignored.length === 0
+  };
+}
+
+export function runWebRtcSignalRelaySelfTest() {
+  const suffix = crypto.randomBytes(4).toString("hex");
+  const clientA = makeSelfTestClient(`webrtc-a-${suffix}`);
+  const clientB = makeSelfTestClient(`webrtc-b-${suffix}`);
+  const outsider = makeSelfTestClient(`webrtc-outsider-${suffix}`);
+  let room = null;
+
+  try {
+    clients.set(clientA.id, clientA);
+    clients.set(clientB.id, clientB);
+    clients.set(outsider.id, outsider);
+    room = makeRoom({ puckCount: 1, lan: true });
+    addPlayer(room, clientA, 0);
+    addPlayer(room, clientB, 1);
+
+    relayWebRtcSignal(clientA, {
+      type: "webrtc-offer",
+      description: { type: "offer", sdp: "v=0\r\n" }
+    });
+    relayWebRtcSignal(clientB, {
+      type: "webrtc-ice",
+      candidate: { candidate: "candidate:1 1 udp 1 127.0.0.1 9 typ host" }
+    });
+
+    const offerRelayed = clientB.socket.messages.some(
+      (message) => message.type === "webrtc-offer" && message.from === 0 && message.description?.type === "offer"
+    );
+    const iceRelayed = clientA.socket.messages.some(
+      (message) => message.type === "webrtc-ice" && message.from === 1 && message.candidate?.candidate
+    );
+    const outsiderClean = outsider.socket.messages.length === 0;
+
+    return {
+      offerRelayed,
+      iceRelayed,
+      outsiderClean,
+      passed: offerRelayed && iceRelayed && outsiderClean
+    };
+  } finally {
+    clients.delete(clientA.id);
+    clients.delete(clientB.id);
+    clients.delete(outsider.id);
+    if (room) rooms.delete(room.code);
+  }
+}
+
 export function runInputSpeedBudgetSelfTest() {
   const now = Date.now();
-  const room = makeRoom({ puckCount: 1, lan: true });
+  const room = makeRoom({ puckCount: 1, lan: true, webrtc: false });
   room.players = [null, null];
   room.state.phase = "playing";
   room.state.pucks = [];
@@ -3499,7 +3761,7 @@ export function runInputSpeedBudgetSelfTest() {
 
 export function runImmediateInputStateSelfTest() {
   const client = makeSelfTestClient(`immediate-input-${crypto.randomBytes(4).toString("hex")}`);
-  const room = makeRoom({ puckCount: 1, lan: true });
+  const room = makeRoom({ puckCount: 1, lan: true, webrtc: false });
   room.players = [{ id: client.id, connected: true }, null];
   room.state.phase = "playing";
   room.state.pucks = [];

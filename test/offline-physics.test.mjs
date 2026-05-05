@@ -341,7 +341,9 @@ const {
   runImmediateInputStateSelfTest,
   runInputSpeedBudgetSelfTest,
   runSlowPuckNoHardStopSelfTest,
-  runTickConfigSelfTest
+  runTickConfigSelfTest,
+  runTurnCredentialNormalizationSelfTest,
+  runWebRtcSignalRelaySelfTest
 } = await import("../server.mjs");
 
 function testActiveDisconnectClosesRemoteRoom() {
@@ -374,13 +376,25 @@ function testServerAppliesInputImmediately() {
   assert.ok(result.passed, JSON.stringify(result));
 }
 
+function testTurnCredentialsNormalizeSafely() {
+  const result = runTurnCredentialNormalizationSelfTest();
+  assert.ok(result.passed, JSON.stringify(result));
+}
+
+function testWebRtcSignalsRelayOnlyToOpponent() {
+  const result = runWebRtcSignalRelaySelfTest();
+  assert.ok(result.passed, JSON.stringify(result));
+}
+
 tests.push(
   testActiveDisconnectClosesRemoteRoom,
   testServerSlowPuckIsNotHardStopped,
   testServerUsesChosenTickRates,
   testServerDynamicMalletUsesAuthoritativeStrikeSpeed,
   testServerHumanInputSpeedBudgetIsUncapped,
-  testServerAppliesInputImmediately
+  testServerAppliesInputImmediately,
+  testTurnCredentialsNormalizeSafely,
+  testWebRtcSignalsRelayOnlyToOpponent
 );
 
 for (const test of tests) {
