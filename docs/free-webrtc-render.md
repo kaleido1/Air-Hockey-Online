@@ -48,7 +48,7 @@ The server accepts common TURN response shapes:
 After deploying, verify Render can read the environment variable and fetch TURN credentials:
 
 ```bash
-curl -s https://air-hockey-online-kaleido1.onrender.com/healthz
+curl -s https://<your-render-service>.onrender.com/healthz
 ```
 
 A healthy TURN-backed deployment should include:
@@ -64,7 +64,7 @@ A healthy TURN-backed deployment should include:
 You can also inspect the normalized browser-facing ICE servers:
 
 ```bash
-curl -s https://air-hockey-online-kaleido1.onrender.com/turn-credentials
+curl -s https://<your-render-service>.onrender.com/turn-credentials
 ```
 
 This endpoint intentionally does not expose `AIR_HOCKEY_TURN_CREDENTIALS_URL`; it only returns the ICE server data that WebRTC needs.
@@ -74,7 +74,7 @@ This endpoint intentionally does not expose `AIR_HOCKEY_TURN_CREDENTIALS_URL`; i
 Render Free web services spin down after idle time. If you want fewer cold starts during testing, point a free uptime monitor at:
 
 ```text
-https://air-hockey-online-kaleido1.onrender.com/healthz
+https://<your-render-service>.onrender.com/healthz
 ```
 
 Use an interval longer than 10 minutes and keep an eye on Render's free instance-hour and bandwidth limits.

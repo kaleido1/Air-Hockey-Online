@@ -100,7 +100,7 @@ AIR_HOCKEY_TURN_CREDENTIALS_URL="https://<appname>.metered.live/api/v1/turn/cred
 部署后可以这样检查：
 
 ```bash
-curl -s https://air-hockey-online-kaleido1.onrender.com/healthz
+curl -s https://<your-render-service>.onrender.com/healthz
 ```
 
 TURN 正常时应看到类似字段：

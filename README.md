@@ -100,7 +100,7 @@ With Metered, create a TURN credential in the dashboard, copy the credential API
 Deployment checks:
 
 ```bash
-curl -s https://air-hockey-online-kaleido1.onrender.com/healthz
+curl -s https://<your-render-service>.onrender.com/healthz
 ```
 
 Expected TURN-ready fields:
