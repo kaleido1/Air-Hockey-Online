@@ -1022,6 +1022,9 @@ function startWebRtcHostGame() {
   const code = roomCode;
   const settings = roomSettings;
   const players = roomPlayers;
+  lastWebRtcSnapshotAt = 0;
+  lastWebRtcRemoteInputAt = 0;
+  lastWebRtcRemoteInputSeq = 0;
   startOfflineGame("webrtc-host", settings.puckCount);
   roomCode = code;
   roomSettings = settings;
@@ -1030,6 +1033,7 @@ function startWebRtcHostGame() {
   updateRoomLabels({ code: roomCode, players: roomPlayers, settings: roomSettings });
   updateScoreboard({ players: roomPlayers });
   setStatus("getReady");
+  sendWebRtcHostSnapshot(true);
 }
 
 function sendWebRtcControl(message) {
@@ -1638,6 +1642,7 @@ function stepOfflineMatterWorld(dt) {
     puck.prevX = puck.x;
     puck.prevY = puck.y;
     applyPuckInertia(puck, physicsConfig, dt);
+    containOfflinePuckInsideTable(puck);
     syncOfflinePuckBody(puck);
   }
 
@@ -1651,7 +1656,9 @@ function stepOfflineMatterWorld(dt) {
     puck.y = body.position.y;
     puck.vx = body.velocity.x * 60;
     puck.vy = body.velocity.y * 60;
+    if (containOfflinePuckInsideTable(puck)) syncOfflinePuckBody(puck);
     resolveOfflinePuckMalletContacts(puck, dt);
+    if (containOfflinePuckInsideTable(puck)) syncOfflinePuckBody(puck);
     const scorer = detectOfflineGoal(puck);
     if (scorer !== null) scored.push({ puck, scorer });
   }
@@ -1687,7 +1694,42 @@ function resolveOfflinePuckMalletContacts(puck, dt) {
   }
 }
 
+function containOfflinePuckInsideTable(puck) {
+  const r = TABLE.puckRadius;
+  const minX = r;
+  const maxX = TABLE.width - r;
+  const minY = r;
+  const maxY = TABLE.height - r;
+  const goalLeft = TABLE.width / 2 - TABLE.goalWidth / 2;
+  const goalRight = TABLE.width / 2 + TABLE.goalWidth / 2;
+  let changed = false;
+
+  if (puck.x < minX) {
+    puck.x = minX;
+    puck.vx = Math.abs(puck.vx || 0) * LOCAL_WALL_RESTITUTION;
+    changed = true;
+  } else if (puck.x > maxX) {
+    puck.x = maxX;
+    puck.vx = -Math.abs(puck.vx || 0) * LOCAL_WALL_RESTITUTION;
+    changed = true;
+  }
+
+  const inGoalOpening = puck.x > goalLeft && puck.x < goalRight;
+  if (!inGoalOpening && puck.y < minY) {
+    puck.y = minY;
+    puck.vy = Math.abs(puck.vy || 0) * LOCAL_WALL_RESTITUTION;
+    changed = true;
+  } else if (!inGoalOpening && puck.y > maxY) {
+    puck.y = maxY;
+    puck.vy = -Math.abs(puck.vy || 0) * LOCAL_WALL_RESTITUTION;
+    changed = true;
+  }
+
+  return changed;
+}
+
 function detectOfflineGoal(puck) {
+  if (puck.x <= TABLE.puckRadius || puck.x >= TABLE.width - TABLE.puckRadius) return null;
   return detectGoalCrossing(TABLE, puck);
 }
 

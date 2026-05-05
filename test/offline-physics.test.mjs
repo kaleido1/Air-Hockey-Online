@@ -11,6 +11,7 @@ import {
   resolveSweptPuckMalletContact,
   separatePuckFromMallet
 } from "../public/offline-physics.js";
+import { decodeRealtimePacket, encodeStatePacket } from "../public/protocol.js";
 
 const TABLE = {
   width: 590,
@@ -67,6 +68,41 @@ function testServeAvoidsMallets() {
   for (const mallet of state.mallets) {
     assert.ok(Math.hypot(position.x - mallet.x, position.y - mallet.y) >= minDistance);
   }
+}
+
+function testStatePacketPreservesPuckMasks() {
+  const baseState = {
+    phase: "countdown",
+    scores: [0, 0],
+    lastScorer: null,
+    winner: null,
+    mallets: [
+      { x: 295, y: 936, vx: 0, vy: 0 },
+      { x: 295, y: 88, vx: 0, vy: 0 }
+    ]
+  };
+  const onePuck = decodeRealtimePacket(
+    encodeStatePacket({
+      ...baseState,
+      pucks: [{ id: "p0", x: 295, y: 624, vx: 0, vy: 0, lastMalletHitIndex: null, hitSerial: 0 }]
+    })
+  );
+  const twoPucks = decodeRealtimePacket(
+    encodeStatePacket({
+      ...baseState,
+      pucks: [
+        { id: "p0", x: 237, y: 606, vx: 0, vy: 0, lastMalletHitIndex: null, hitSerial: 0 },
+        { id: "p1", x: 353, y: 642, vx: 0, vy: 0, lastMalletHitIndex: 1, hitSerial: 7 }
+      ]
+    })
+  );
+
+  assert.equal(onePuck.state.pucks.length, 1);
+  assert.equal(onePuck.state.pucks[0].id, "p0");
+  assert.equal(twoPucks.state.pucks.length, 2);
+  assert.equal(twoPucks.state.pucks[1].id, "p1");
+  assert.equal(twoPucks.state.pucks[1].lastMalletHitIndex, 1);
+  assert.equal(twoPucks.state.pucks[1].hitSerial, 7);
 }
 
 function testFastMalletSweepHitsStaticPuck() {
@@ -250,6 +286,47 @@ function testGoalScoredWhenPuckCrossesLineBetweenFrames() {
   assert.equal(detectGoalCrossing(TABLE, outsideArcIntersection), null);
 }
 
+function testCornerPuckDoesNotCountAsGoal() {
+  const cornerCases = [
+    {
+      prevX: TABLE.puckRadius + 3,
+      prevY: TABLE.puckRadius + 4,
+      x: TABLE.puckRadius + 1,
+      y: -TABLE.puckRadius * 0.6,
+      vx: -120,
+      vy: -260
+    },
+    {
+      prevX: TABLE.width - TABLE.puckRadius - 3,
+      prevY: TABLE.puckRadius + 4,
+      x: TABLE.width - TABLE.puckRadius - 1,
+      y: -TABLE.puckRadius * 0.6,
+      vx: 120,
+      vy: -260
+    },
+    {
+      prevX: TABLE.puckRadius + 3,
+      prevY: TABLE.height - TABLE.puckRadius - 4,
+      x: TABLE.puckRadius + 1,
+      y: TABLE.height + TABLE.puckRadius * 0.6,
+      vx: -120,
+      vy: 260
+    },
+    {
+      prevX: TABLE.width - TABLE.puckRadius - 3,
+      prevY: TABLE.height - TABLE.puckRadius - 4,
+      x: TABLE.width - TABLE.puckRadius - 1,
+      y: TABLE.height + TABLE.puckRadius * 0.6,
+      vx: 120,
+      vy: 260
+    }
+  ];
+
+  for (const puck of cornerCases) {
+    assert.equal(detectGoalCrossing(TABLE, puck), null);
+  }
+}
+
 function testPuckInertiaDampsWithoutSnappingFastPuck() {
   const puck = { vx: 1000, vy: 0 };
 
@@ -319,6 +396,7 @@ function testDisplayPuckAppliesFrictionWithoutHardStop() {
 const tests = [
   testMalletStartsNearOwnGoals,
   testServeAvoidsMallets,
+  testStatePacketPreservesPuckMasks,
   testFastMalletSweepHitsStaticPuck,
   testBottomMalletOverlapFallbackPushesPuckUp,
   testTopMalletOverlapFallbackPushesPuckDown,
@@ -326,6 +404,7 @@ const tests = [
   testDirectSweepHelperMatchesOfflineStrikeFeel,
   testFastPuckCannotTunnelThroughStationaryMallet,
   testGoalScoredWhenPuckCrossesLineBetweenFrames,
+  testCornerPuckDoesNotCountAsGoal,
   testPuckInertiaDampsWithoutSnappingFastPuck,
   testPuckInertiaKeepsSlowPuckMoving,
   testMalletStepLimiterCapsInputJump,
