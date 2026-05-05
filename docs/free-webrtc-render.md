@@ -1,11 +1,12 @@
-# Free Render Deployment
+# Free Render WebRTC Deployment
 
-This project currently uses a free-first, server-authoritative realtime setup:
+This project uses a free-first WebRTC setup:
 
-- Render Free Web Service hosts the page, room flow, and WebSocket realtime transport.
-- The browser sends local input immediately to Render while also showing local hit feedback for the controlling player.
-- Render remains authoritative for puck physics, scoring, pause, reset, and final correction.
-- WebRTC peer gameplay prediction is disabled in production because it can make the puck react to non-authoritative remote hints and create non-physical motion.
+- Render Free Web Service hosts the page, room flow, and WebSocket signaling.
+- WebSocket handles matchmaking, room codes, reconnects, WebRTC offers/answers, and ICE candidates.
+- Realtime gameplay runs over WebRTC DataChannel once peers connect.
+- The room host browser runs the authoritative physics loop and sends state snapshots to the peer.
+- TURN credentials are fetched server-side from `AIR_HOCKEY_TURN_CREDENTIALS_URL`.
 
 ## Render
 
@@ -19,13 +20,54 @@ region: singapore
 The service exposes:
 
 - `/` for the game
-- `/ws` for authoritative WebSocket realtime
+- `/ws` for room and WebRTC signaling
+- `/turn-credentials` for normalized browser ICE servers
 - `/runtime-config.js` for browser runtime config
-- `/healthz` for optional uptime checks
+- `/healthz` for deployment and TURN checks
 
-## Runtime Behavior
+## Metered TURN
 
-The code path is intentionally WebSocket-first on Render Free. This keeps all multiplayer modes using the same server-owned physics result instead of mixing authoritative state with peer-to-peer prediction.
+Metered's Get TURN Credential endpoint returns an ICE servers array that can be used by `RTCPeerConnection`.
+
+Create a TURN credential in the Metered dashboard, then set this Render environment variable:
+
+```bash
+AIR_HOCKEY_TURN_CREDENTIALS_URL="https://<appname>.metered.live/api/v1/turn/credentials?apiKey=<credential-api-key>"
+```
+
+Replace `<appname>` with your Metered app name. Keep the full URL in Render environment variables only; do not commit it to the repository.
+
+The server accepts common TURN response shapes:
+
+- an ICE servers array
+- `{ "iceServers": [...] }`
+- a single `{ "urls": "...", "username": "...", "credential": "..." }` server object
+
+## Deployment Checks
+
+After deploying, verify Render can read the environment variable and fetch TURN credentials:
+
+```bash
+curl -s https://air-hockey-online-kaleido1.onrender.com/healthz
+```
+
+A healthy TURN-backed deployment should include:
+
+```json
+{
+  "turnConfigured": true,
+  "turnFetchOk": true,
+  "iceServerCount": 5
+}
+```
+
+You can also inspect the normalized browser-facing ICE servers:
+
+```bash
+curl -s https://air-hockey-online-kaleido1.onrender.com/turn-credentials
+```
+
+This endpoint intentionally does not expose `AIR_HOCKEY_TURN_CREDENTIALS_URL`; it only returns the ICE server data that WebRTC needs.
 
 ## Optional Free Keepalive
 
@@ -39,4 +81,4 @@ Use an interval longer than 10 minutes and keep an eye on Render's free instance
 
 ## Current Transport Behavior
 
-All inputs go to Render over WebSocket. The local player still gets immediate visual/audio hit feedback, but puck ownership, collisions, goals, reset, pause, and final corrections all come back from the authoritative server.
+All multiplayer room setup still starts through Render over WebSocket. After both players join and the WebRTC DataChannel opens, gameplay input and state snapshots move peer-to-peer through WebRTC. TURN relays traffic only when a direct peer path is unavailable.

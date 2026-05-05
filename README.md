@@ -39,7 +39,7 @@ Wireless mode is designed for players on the same local network. Two nearby devi
 
 ### Online Two Players
 
-Online mode supports remote play through room creation and room join flows. Players can create a room, share the room code, reconnect, leave, and return to the same session flow with server-authoritative state sync.
+Online mode supports remote play through room creation and room join flows. Players can create a room, share the room code, reconnect, leave, and return to the same session flow. The Node server keeps matchmaking and signaling on WebSocket, while active gameplay uses WebRTC DataChannel with TURN support for NAT traversal.
 
 ## Features
 
@@ -48,9 +48,9 @@ Online mode supports remote play through room creation and room join flows. Play
 - Wireless two-player mode for devices on the same network.
 - Online two-player matchmaking with quick match, room creation, room codes, reconnect, restart, and leave flows.
 - One-puck and two-puck match options.
-- Server-authoritative puck, mallet, scoring, and match-state logic.
+- WebRTC DataChannel realtime play with a host-authoritative browser physics loop.
 - Fast collision response tuned for competitive play, including stuck-puck rescue and safer serve placement.
-- Local visual and audio feedback for hits while final online state remains server-owned.
+- WebSocket signaling for rooms, matchmaking, reconnects, WebRTC offers/answers, and ICE candidates.
 - First-to-7 scoring with pause, goal, game-over, restart, and return-to-menu states.
 - Procedural Web Audio sound effects with an iOS canvas sound gate for mobile audio unlock.
 - Touch-friendly gameplay with browser-based instant play.
@@ -58,11 +58,12 @@ Online mode supports remote play through room creation and room join flows. Play
 ## Technology
 
 - Node.js HTTP server with a lightweight WebSocket implementation.
-- Server-authoritative WebSocket realtime path tuned for free Render deployment.
+- WebRTC DataChannel transport for online and wireless multiplayer, with WebSocket kept for room signaling.
+- TURN credential loading through `AIR_HOCKEY_TURN_CREDENTIALS_URL`, including Metered ICE server responses.
 - Canvas rendering for the rink, puck, mallets, overlays, and menus.
-- Shared game rules between server and browser through `public/offline-physics.js`.
+- Shared browser physics helpers through `public/offline-physics.js`.
 - Matter.js-powered local/offline physics stepping and local puck prediction helpers.
-- SAT circle collision checks on the server for robust puck and mallet contact resolution.
+- SAT circle collision helpers for robust puck and mallet contact resolution.
 - Procedural Web Audio effects, audio session recovery, and iOS inline-media unlock support.
 - Bilingual interface, browser-based room management, and persistent language/audio preferences.
 
@@ -83,6 +84,32 @@ npm test
 ```
 
 See [Free Render Deployment](./docs/free-webrtc-render.md) for the free deployment configuration.
+
+## WebRTC, TURN, And Metered
+
+Online and wireless multiplayer use WebRTC DataChannel for realtime gameplay. The Node server still hosts the page and `/ws` signaling channel, but it does not need to proxy every gameplay packet once peers connect.
+
+For reliable connections across NATs and mobile networks, configure a TURN credential URL:
+
+```bash
+AIR_HOCKEY_TURN_CREDENTIALS_URL="https://<appname>.metered.live/api/v1/turn/credentials?apiKey=<credential-api-key>"
+```
+
+With Metered, create a TURN credential in the dashboard, copy the credential API key, and replace `<appname>` with your Metered app name. Render should store this value as an environment variable, not in the repository.
+
+Deployment checks:
+
+```bash
+curl -s https://air-hockey-online-kaleido1.onrender.com/healthz
+```
+
+Expected TURN-ready fields:
+
+```json
+{"turnConfigured":true,"turnFetchOk":true,"iceServerCount":5}
+```
+
+The browser fetches `/turn-credentials`, which returns only normalized ICE servers. The original Metered URL is kept server-side.
 
 ## License
 

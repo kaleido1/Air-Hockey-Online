@@ -39,7 +39,7 @@ https://air-hockey-online-kaleido1.onrender.com/
 
 ### 在线双人
 
-在线双人模式支持异地联机。玩家可以创建房间、通过房间号加入、重连、离开房间，并通过服务端权威同步保持一致的比赛状态。
+在线双人模式支持异地联机。玩家可以创建房间、通过房间号加入、重连、离开房间。Node 服务端继续负责房间、匹配和 WebRTC 信令，真正对局中的实时数据通过 WebRTC DataChannel 传输，并支持 TURN 服务器用于 NAT 穿透。
 
 ## 已实现的 Features
 
@@ -48,9 +48,9 @@ https://air-hockey-online-kaleido1.onrender.com/
 - 无线双人模式，适合同一网络环境下的设备快速对战。
 - 在线双人模式，支持快速匹配、房间创建、房间号加入、重连、重开和离开流程。
 - 支持单冰球与双冰球对局。
-- 服务端权威的冰球、球拍、得分和比赛状态逻辑。
+- 使用 WebRTC DataChannel 进行实时对战，并由房主浏览器运行权威物理循环。
 - 面向竞技体验优化的快速碰撞响应，并包含卡球救援与更安全的发球位置选择。
-- 本地即时显示和播放击球反馈，在线最终状态仍以服务端为准。
+- WebSocket 用于房间、匹配、重连、WebRTC offer/answer 和 ICE candidate 信令。
 - 先到 7 分的比赛规则，以及暂停、进球、结算、重开、返回主菜单等完整流程。
 - 使用 Web Audio 生成游戏音效，并为 iOS 保留 canvas 内声音解锁提示。
 - 直接浏览器打开即可游玩，适配触屏设备。
@@ -58,11 +58,12 @@ https://air-hockey-online-kaleido1.onrender.com/
 ## 技术实现
 
 - 基于 Node.js 的 HTTP 服务与轻量级 WebSocket 实现。
-- 面向 Render 免费部署调优的服务端权威 WebSocket 实时同步路径。
+- 在线和无线双人使用 WebRTC DataChannel，WebSocket 保留为房间信令通道。
+- 通过 `AIR_HOCKEY_TURN_CREDENTIALS_URL` 加载 TURN 凭证，支持 Metered 返回的 ICE server 配置。
 - 使用 Canvas 渲染球桌、冰球、球拍、界面和覆盖层。
-- 通过 `public/offline-physics.js` 在服务端和浏览器之间复用核心规则。
+- 通过 `public/offline-physics.js` 复用浏览器端核心物理辅助逻辑。
 - 使用 Matter.js 处理本地/离线物理步进和本地冰球预测辅助。
-- 服务端使用 SAT 圆形碰撞检测，提高冰球与球拍接触解析的稳定性。
+- 使用 SAT 圆形碰撞辅助，提高冰球与球拍接触解析的稳定性。
 - 使用程序化 Web Audio 生成音效，并支持音频会话恢复与 iOS inline media 解锁。
 - 支持中英文界面、浏览器端多人房间流程管理，以及语言/声音偏好的本地保存。
 
@@ -83,6 +84,32 @@ npm test
 ```
 
 免费部署配置见 [Free Render Deployment](./docs/free-webrtc-render.md)。
+
+## WebRTC、TURN 与 Metered
+
+在线和无线双人模式使用 WebRTC DataChannel 传输实时对局数据。Node 服务端仍然负责页面托管和 `/ws` 信令，但当两个浏览器建立连接后，不再需要服务端转发每一个实时游戏包。
+
+为了在 NAT、移动网络和复杂路由环境下更稳定连接，需要配置 TURN 凭证 URL：
+
+```bash
+AIR_HOCKEY_TURN_CREDENTIALS_URL="https://<appname>.metered.live/api/v1/turn/credentials?apiKey=<credential-api-key>"
+```
+
+如果使用 Metered，可以在 Metered 控制台创建 TURN credential，复制 credential API key，并把 `<appname>` 替换成你的 Metered app 名称。Render 中应把这个完整 URL 配成环境变量，不要写入仓库。
+
+部署后可以这样检查：
+
+```bash
+curl -s https://air-hockey-online-kaleido1.onrender.com/healthz
+```
+
+TURN 正常时应看到类似字段：
+
+```json
+{"turnConfigured":true,"turnFetchOk":true,"iceServerCount":5}
+```
+
+浏览器只会请求 `/turn-credentials` 获取规范化后的 ICE servers；原始 Metered URL 只保留在服务端环境变量中。
 
 ## License
 
