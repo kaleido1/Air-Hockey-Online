@@ -327,6 +327,76 @@ function testCornerPuckDoesNotCountAsGoal() {
   }
 }
 
+function containTestPuckInsideTable(puck) {
+  const r = TABLE.puckRadius;
+  puck.x = Math.max(r, Math.min(TABLE.width - r, puck.x));
+  puck.y = Math.max(r, Math.min(TABLE.height - r, puck.y));
+}
+
+function pushTestPuckToContainedSeparation(puck, mallet) {
+  const target = TABLE.malletRadius + TABLE.puckRadius + CONFIG.hardContactSeparation;
+  const dx = puck.x - mallet.x;
+  const dy = puck.y - mallet.y;
+  if (Math.hypot(dx, dy) >= target - 0.001) return;
+
+  const length = Math.hypot(dx, dy) || 1;
+  const directions = [
+    { x: dx / length, y: dy / length },
+    { x: 0, y: mallet.y < TABLE.height / 2 ? 1 : -1 },
+    { x: mallet.x < TABLE.width / 2 ? 1 : -1, y: 0 },
+    {
+      x: mallet.x < TABLE.width / 2 ? 0.7071 : -0.7071,
+      y: mallet.y < TABLE.height / 2 ? 0.7071 : -0.7071
+    }
+  ];
+  let best = null;
+  for (const direction of directions) {
+    const candidate = {
+      x: Math.max(TABLE.puckRadius, Math.min(TABLE.width - TABLE.puckRadius, mallet.x + direction.x * target)),
+      y: Math.max(TABLE.puckRadius, Math.min(TABLE.height - TABLE.puckRadius, mallet.y + direction.y * target))
+    };
+    const distance = Math.hypot(candidate.x - mallet.x, candidate.y - mallet.y);
+    if (!best || distance > best.distance) best = { ...candidate, distance };
+  }
+  if (best) {
+    puck.x = best.x;
+    puck.y = best.y;
+  }
+}
+
+function testCornerContainmentSeparatesMalletOverlap() {
+  const corners = [
+    { puck: { x: -10, y: -8, vx: 0, vy: 0 }, mallet: { x: TABLE.malletRadius, y: TABLE.malletRadius } },
+    {
+      puck: { x: TABLE.width + 10, y: -8, vx: 0, vy: 0 },
+      mallet: { x: TABLE.width - TABLE.malletRadius, y: TABLE.malletRadius }
+    },
+    {
+      puck: { x: -10, y: TABLE.height + 8, vx: 0, vy: 0 },
+      mallet: { x: TABLE.malletRadius, y: TABLE.height - TABLE.malletRadius }
+    },
+    {
+      puck: { x: TABLE.width + 10, y: TABLE.height + 8, vx: 0, vy: 0 },
+      mallet: { x: TABLE.width - TABLE.malletRadius, y: TABLE.height - TABLE.malletRadius }
+    }
+  ];
+  const target = TABLE.malletRadius + TABLE.puckRadius + CONFIG.hardContactSeparation;
+
+  for (const { puck, mallet } of corners) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      containTestPuckInsideTable(puck);
+      separatePuckFromMallet(TABLE, CONFIG, puck, mallet, 0);
+      containTestPuckInsideTable(puck);
+      pushTestPuckToContainedSeparation(puck, mallet);
+      containTestPuckInsideTable(puck);
+    }
+
+    assert.ok(puck.x >= TABLE.puckRadius && puck.x <= TABLE.width - TABLE.puckRadius);
+    assert.ok(puck.y >= TABLE.puckRadius && puck.y <= TABLE.height - TABLE.puckRadius);
+    assert.ok(Math.hypot(puck.x - mallet.x, puck.y - mallet.y) >= target - 0.001);
+  }
+}
+
 function testPuckInertiaDampsWithoutSnappingFastPuck() {
   const puck = { vx: 1000, vy: 0 };
 
@@ -405,6 +475,7 @@ const tests = [
   testFastPuckCannotTunnelThroughStationaryMallet,
   testGoalScoredWhenPuckCrossesLineBetweenFrames,
   testCornerPuckDoesNotCountAsGoal,
+  testCornerContainmentSeparatesMalletOverlap,
   testPuckInertiaDampsWithoutSnappingFastPuck,
   testPuckInertiaKeepsSlowPuckMoving,
   testMalletStepLimiterCapsInputJump,

@@ -1658,7 +1658,7 @@ function stepOfflineMatterWorld(dt) {
     puck.vy = body.velocity.y * 60;
     if (containOfflinePuckInsideTable(puck)) syncOfflinePuckBody(puck);
     resolveOfflinePuckMalletContacts(puck, dt);
-    if (containOfflinePuckInsideTable(puck)) syncOfflinePuckBody(puck);
+    if (resolveContainedPuckMalletOverlaps(puck)) syncOfflinePuckBody(puck);
     const scorer = detectOfflineGoal(puck);
     if (scorer !== null) scored.push({ puck, scorer });
   }
@@ -1692,6 +1692,69 @@ function resolveOfflinePuckMalletContacts(puck, dt) {
     syncOfflinePuckBody(puck);
     playFx("hit", 0.34);
   }
+}
+
+function resolveContainedPuckMalletOverlaps(puck) {
+  if (!offlineGame?.state) return false;
+  let changed = containOfflinePuckInsideTable(puck);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let separated = false;
+    for (let index = 0; index < offlineGame.state.mallets.length; index += 1) {
+      const mallet = offlineGame.state.mallets[index];
+      if (separatePuckFromMallet(TABLE, offlinePhysicsConfig(), puck, mallet, index)) {
+        separated = true;
+      }
+      if (containOfflinePuckInsideTable(puck)) separated = true;
+      if (pushPuckToContainedSeparation(puck, mallet)) separated = true;
+    }
+    const contained = containOfflinePuckInsideTable(puck);
+    changed = changed || separated || contained;
+    if (!separated && !contained) break;
+  }
+  return changed;
+}
+
+function pushPuckToContainedSeparation(puck, mallet) {
+  const config = offlinePhysicsConfig();
+  const target = TABLE.malletRadius + TABLE.puckRadius + Math.max(0, config.hardContactSeparation || 0);
+  if (Math.hypot((puck.x || 0) - (mallet.x || 0), (puck.y || 0) - (mallet.y || 0)) >= target - 0.001) {
+    return false;
+  }
+
+  const r = TABLE.puckRadius;
+  const bounds = {
+    minX: r,
+    maxX: TABLE.width - r,
+    minY: r,
+    maxY: TABLE.height - r
+  };
+  const dx = (puck.x || 0) - (mallet.x || 0);
+  const dy = (puck.y || 0) - (mallet.y || 0);
+  const length = Math.hypot(dx, dy) || 1;
+  const directions = [
+    { x: dx / length, y: dy / length },
+    { x: 0, y: mallet.y < TABLE.height / 2 ? 1 : -1 },
+    { x: mallet.x < TABLE.width / 2 ? 1 : -1, y: 0 },
+    {
+      x: mallet.x < TABLE.width / 2 ? 0.7071 : -0.7071,
+      y: mallet.y < TABLE.height / 2 ? 0.7071 : -0.7071
+    }
+  ];
+  let best = null;
+
+  for (const direction of directions) {
+    const candidate = {
+      x: clamp(mallet.x + direction.x * target, bounds.minX, bounds.maxX),
+      y: clamp(mallet.y + direction.y * target, bounds.minY, bounds.maxY)
+    };
+    const distance = Math.hypot(candidate.x - mallet.x, candidate.y - mallet.y);
+    if (!best || distance > best.distance) best = { ...candidate, distance };
+  }
+
+  if (!best || best.distance <= Math.hypot(dx, dy) + 0.001) return false;
+  puck.x = best.x;
+  puck.y = best.y;
+  return true;
 }
 
 function containOfflinePuckInsideTable(puck) {
