@@ -591,7 +591,10 @@ window.addEventListener("keydown", (event) => {
     unlockAudio();
     if (offlineGame) {
       toggleOfflinePause();
-      if (webrtc?.isHost) sendWebRtcControl({ type: "paused" });
+      if (webrtc?.isHost) {
+        sendWebRtcControl({ type: "paused" });
+        sendWebRtcHostSnapshot(true);
+      }
       return;
     }
     if (!sendWebRtcControl({ type: "pause" })) send({ type: "pause" });
@@ -994,6 +997,7 @@ function handleWebRtcControl(raw) {
   if (webrtc?.isHost && message.type === "pause") {
     toggleOfflinePause();
     sendWebRtcControl({ type: "paused" });
+    sendWebRtcHostSnapshot(true);
   } else if (webrtc?.isHost && message.type === "restart") {
     startWebRtcHostGame();
     sendWebRtcControl({ type: "restart" });
@@ -1276,7 +1280,7 @@ function setButtons() {
   els.createButton.disabled = !connected;
   els.botButton.disabled = false;
   els.copyButton.disabled = !shouldExposeRoomInUrl();
-  els.restartButton.disabled = !inRoom || playerIndex !== 0;
+  els.restartButton.disabled = !inRoom;
   els.leaveButton.disabled = !inRoom;
 }
 
@@ -1847,11 +1851,11 @@ function updateOfflineBot(dt, now) {
   const opponent = state.mallets[0];
   const brain = updateOfflineBotBrain(now);
   const defensiveX = TABLE.width / 2;
-  const defensiveY = TABLE.height * 0.18;
-  const goalLeft = TABLE.width / 2 - TABLE.goalWidth / 2 + TABLE.malletRadius * 0.32;
-  const goalRight = TABLE.width / 2 + TABLE.goalWidth / 2 - TABLE.malletRadius * 0.32;
+  const defensiveY = TABLE.height * 0.145;
+  const goalLeft = TABLE.width / 2 - TABLE.goalWidth / 2 + TABLE.malletRadius * 0.2;
+  const goalRight = TABLE.width / 2 + TABLE.goalWidth / 2 - TABLE.malletRadius * 0.2;
   let target = { x: defensiveX, y: defensiveY };
-  let speed = brain.mode === "ambush" ? OFFLINE_BOT_MAX_SPEED : brain.mode === "bait" ? 2100 : 2850;
+  let speed = brain.mode === "ambush" ? OFFLINE_BOT_MAX_SPEED : brain.mode === "bait" ? 2550 : 3300;
 
   const servePuck = state.pucks.find((puck) => puck.y < TABLE.height / 2 && Math.hypot(puck.vx, puck.vy) < 8);
   if (servePuck) {
@@ -1875,20 +1879,20 @@ function updateOfflineBot(dt, now) {
   }
 
   const threats = state.pucks
-    .filter((puck) => puck.y < TABLE.height * 0.66 || puck.vy < -70)
+    .filter((puck) => puck.y < TABLE.height * 0.72 || puck.vy < -45)
     .map((puck) => {
       const timeToGuardLine =
-        puck.vy < -40 ? clamp((puck.y - TABLE.height * 0.18) / -puck.vy, 0, 0.92) : 0.36;
+        puck.vy < -35 ? clamp((puck.y - defensiveY) / -puck.vy, 0, 1.05) : 0.36;
       const timeToGoalLine =
-        puck.vy < -40 ? clamp((puck.y - (TABLE.puckRadius + 18)) / -puck.vy, 0, 0.92) : 0.36;
-      const predictedGuardX = predictOfflinePuckXAtY(puck, TABLE.height * 0.18);
+        puck.vy < -35 ? clamp((puck.y - (TABLE.puckRadius + 18)) / -puck.vy, 0, 1.05) : 0.36;
+      const predictedGuardX = predictOfflinePuckXAtY(puck, defensiveY);
       const predictedGoalX = predictOfflinePuckXAtY(puck, TABLE.puckRadius + 28);
       const danger =
-        (puck.vy < -90 ? 3 : 0) +
-        (puck.y < TABLE.height * 0.38 ? 2 : 0) +
-        (predictedGoalX > goalLeft - 34 && predictedGoalX < goalRight + 34 ? 3 : 0) +
-        (Math.abs(predictedGoalX - defensiveX) < 86 ? 1.1 : 0) +
-        Math.max(0, 1 - timeToGoalLine) * 2;
+        (puck.vy < -70 ? 3.2 : 0) +
+        (puck.y < TABLE.height * 0.44 ? 2.4 : 0) +
+        (predictedGoalX > goalLeft - 48 && predictedGoalX < goalRight + 48 ? 3.7 : 0) +
+        (Math.abs(predictedGoalX - defensiveX) < 112 ? 1.4 : 0) +
+        Math.max(0, 1.1 - timeToGoalLine) * 2.5;
       return { puck, predictedGuardX, predictedGoalX, danger, timeToGuardLine, timeToGoalLine };
     })
     .sort((a, b) => b.danger - a.danger || a.puck.y - b.puck.y);
@@ -1898,27 +1902,27 @@ function updateOfflineBot(dt, now) {
     const puck = threat.puck;
     const puckSpeed = Math.hypot(puck.vx, puck.vy);
     const mustGuard =
-      threat.danger > 4.4 || puck.y < TABLE.height * 0.34 || puck.vy < -240 || threat.timeToGoalLine < 0.33;
-    const interceptBias = puck.vy < 0 ? clamp(threat.timeToGuardLine * 0.36, 0.06, 0.24) : 0.04;
-    const surpriseLane = brain.mode === "ambush" && !mustGuard ? brain.side * (52 + Math.sin(now / 160) * 18) : 0;
+      threat.danger > 3.6 || puck.y < TABLE.height * 0.4 || puck.vy < -190 || threat.timeToGoalLine < 0.42;
+    const interceptBias = puck.vy < 0 ? clamp(threat.timeToGuardLine * 0.42, 0.05, 0.3) : 0.05;
+    const surpriseLane = brain.mode === "ambush" && !mustGuard ? brain.side * (78 + Math.sin(now / 150) * 24) : 0;
 
     if (mustGuard) {
       const guardX = clamp(
-        lerp(threat.predictedGuardX, threat.predictedGoalX, threat.timeToGoalLine < 0.22 ? 0.8 : 0.42) +
-          puck.vx * 0.04,
+        lerp(threat.predictedGuardX, threat.predictedGoalX, threat.timeToGoalLine < 0.26 ? 0.86 : 0.52) +
+          puck.vx * 0.055,
         goalLeft,
         goalRight
       );
       target = {
         x: guardX,
         y: clamp(
-          TABLE.height * (threat.timeToGoalLine < 0.2 ? 0.11 : 0.145) +
-            Math.abs(guardX - defensiveX) * 0.05,
+          TABLE.height * (threat.timeToGoalLine < 0.24 ? 0.095 : 0.125) +
+            Math.abs(guardX - defensiveX) * 0.035,
           TABLE.malletRadius,
-          TABLE.height * 0.24
+          TABLE.height * 0.21
         )
       };
-      speed = clamp(2900 + puckSpeed * 0.62, 3000, OFFLINE_BOT_MAX_SPEED);
+      speed = clamp(3600 + puckSpeed * 0.78, 3800, OFFLINE_BOT_MAX_SPEED);
     } else {
       const attackPlan = chooseOfflineBotAttackTarget(puck, opponent, brain, now, interceptBias, surpriseLane);
       target = attackPlan.target;
@@ -1926,13 +1930,13 @@ function updateOfflineBot(dt, now) {
     }
   } else if (brain.mode === "bait") {
     target = {
-      x: clamp(defensiveX + brain.side * 88, goalLeft, goalRight),
-      y: TABLE.height * 0.2
+      x: clamp(defensiveX + brain.side * 104, goalLeft, goalRight),
+      y: TABLE.height * 0.17
     };
   } else if (brain.mode === "ambush") {
     target = {
-      x: clamp(defensiveX + brain.side * 122, TABLE.malletRadius, TABLE.width - TABLE.malletRadius),
-      y: TABLE.height * 0.28
+      x: clamp(defensiveX + brain.side * 148, TABLE.malletRadius, TABLE.width - TABLE.malletRadius),
+      y: TABLE.height * 0.3
     };
   }
 
@@ -1959,12 +1963,12 @@ function moveOfflineBotToward(target, speed, dt, now) {
 function updateOfflineBotBrain(now) {
   if (!offlineGame.botBrain || now >= offlineGame.botBrain.nextDecisionAt) {
     const roll = Math.random();
-    const mode = roll > 0.64 ? "ambush" : roll > 0.34 ? "bait" : "guard";
+    const mode = roll > 0.48 ? "ambush" : roll > 0.24 ? "bait" : "guard";
     offlineGame.botBrain = {
       mode,
       side: Math.random() > 0.5 ? 1 : -1,
-      tempo: 180 + Math.random() * 420,
-      nextDecisionAt: now + (mode === "ambush" ? 420 : 680) + Math.random() * (mode === "ambush" ? 420 : 860)
+      tempo: 150 + Math.random() * 330,
+      nextDecisionAt: now + (mode === "ambush" ? 320 : 560) + Math.random() * (mode === "ambush" ? 360 : 700)
     };
   }
   return offlineGame.botBrain;
@@ -1973,12 +1977,12 @@ function updateOfflineBotBrain(now) {
 function chooseOfflineBotAttackTarget(puck, opponent, brain, now, interceptBias, surpriseLane) {
   const opponentBias = opponent.x < TABLE.width / 2 ? 1 : -1;
   const openSide = clamp(
-    opponent.x + opponentBias * (TABLE.malletRadius * 1.2 + 36),
+    opponent.x + opponentBias * (TABLE.malletRadius * 1.45 + 48),
     TABLE.malletRadius,
     TABLE.width - TABLE.malletRadius
   );
   const cutbackSide = clamp(
-    opponent.x - opponentBias * (TABLE.malletRadius * 0.95 + 18),
+    opponent.x - opponentBias * (TABLE.malletRadius * 1.1 + 34),
     TABLE.malletRadius,
     TABLE.width - TABLE.malletRadius
   );
@@ -1988,16 +1992,18 @@ function chooseOfflineBotAttackTarget(puck, opponent, brain, now, interceptBias,
       : brain.mode === "bait"
         ? cutbackSide
         : lerp(openSide, puck.x, 0.45);
-  const laneLead = brain.mode === "ambush" ? 0.26 : brain.mode === "bait" ? -0.05 : 0.14;
+  const laneLead = brain.mode === "ambush" ? 0.38 : brain.mode === "bait" ? -0.02 : 0.18;
   const attackY =
     brain.mode === "ambush" && puck.vy > -180
-      ? puck.y + 44
-      : puck.y - (brain.mode === "bait" ? 128 : 92);
+      ? puck.y + 66
+      : puck.y - (brain.mode === "bait" ? 112 : 74);
 
   return {
     target: {
       x: clamp(
-        lerp(puck.x + puck.vx * interceptBias, laneX, 0.42) + surpriseLane + Math.sin(now / 210) * 6,
+        lerp(puck.x + puck.vx * interceptBias, laneX, brain.mode === "ambush" ? 0.58 : 0.46) +
+          surpriseLane +
+          Math.sin(now / 185) * 8,
         TABLE.malletRadius,
         TABLE.width - TABLE.malletRadius
       ),
@@ -2009,11 +2015,11 @@ function chooseOfflineBotAttackTarget(puck, opponent, brain, now, interceptBias,
     },
     speedBase:
       brain.mode === "ambush"
-        ? 3100
+        ? 3650
         : brain.mode === "bait"
-          ? 2050
-          : 2650,
-    speedScale: brain.mode === "ambush" ? 0.55 : brain.mode === "bait" ? 0.18 : 0.38
+          ? 2450
+          : 3050,
+    speedScale: brain.mode === "ambush" ? 0.72 : brain.mode === "bait" ? 0.26 : 0.46
   };
 }
 
@@ -2333,8 +2339,12 @@ function handleTouchPause(event, point) {
     lastCenterTapAt = 0;
     if (offlineGame) {
       toggleOfflinePause();
+      if (webrtc?.isHost) {
+        sendWebRtcControl({ type: "paused" });
+        sendWebRtcHostSnapshot(true);
+      }
     } else {
-      send({ type: "pause" });
+      if (!sendWebRtcControl({ type: "pause" })) send({ type: "pause" });
     }
   } else {
     lastCenterTapAt = now;
